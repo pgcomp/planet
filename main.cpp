@@ -1,22 +1,10 @@
 #include <SDL2/SDL.h>
-#include <GL/glew.h>
-#include <cstdio>
+#include "render.h"
+#include "math.h"
+#include "logging.h"
+#include "pp.h"
 
-#define LOG_ERROR(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
-
-#define JOIN__(a, b) a##b
-#define JOIN_(a, b) JOIN__(a, b)
-#define JOIN(a, b) JOIN_(a, b)
-
-#define NUM_VA_ARGS_(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, N, ...) N
-#define NUM_VA_ARGS(...) NUM_VA_ARGS_(__VA_ARGS__, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1)
-
-#define DEFER1(code, line) struct _D##line { ~_D##line() { code; } } _d##line
-#define DEFER3(code, line, T, a) struct _D##line { T a; _D##line(T a_):a(a_){} ~_D##line() { code; } } _d##line(a)
-#define DEFER_(code, line, ...) JOIN(DEFER, NUM_VA_ARGS(1, ##__VA_ARGS__))(code, line, ##__VA_ARGS__)
-//#define DEFER(code, ...) DEFER_(printf(#code"\n"); code, __LINE__, ##__VA_ARGS__)
-#define DEFER(code, ...) DEFER_(code, __LINE__, ##__VA_ARGS__)
-
+#define ArrayCount(arr) (sizeof(arr)/sizeof(*arr))
 
 
 int main(int argc, char **argv)
@@ -87,6 +75,76 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // Setup things
+
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_DEPTH_TEST);
+
+    glFrontFace(GL_CCW);
+    glCullFace(GL_BACK);
+    glEnable(GL_CULL_FACE);
+
+    const char *shader_source =
+        GLSL(ATTRIBUTE(vec3, Position, 0);
+             void main() {
+             gl_Position = vec4(Position.xy, 0.0, 1.0);
+             },
+             void main() {
+             gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+             });
+
+    GLuint shader = CreateShaderFromSource(shader_source);
+
+    if (shader == 0)
+    {
+        return 1;
+    }
+
+    DrawItem cube = {};
+    {
+        //Vec3f o = V3(2.0f, -1.5f, 5.0f);
+        Vec3f o = V3(0.0f);
+        float k = 1.0f;
+        Vec3f verts[] =
+        {
+            o + V3(-k, -k, -k), // 0
+            o + V3( k, -k, -k), // 1
+            o + V3( k,  k, -k), // 2
+            o + V3(-k,  k, -k), // 3
+
+            o + V3(-k, -k,  k), // 4
+            o + V3( k, -k,  k), // 5
+            o + V3( k,  k,  k), // 6
+            o + V3(-k,  k,  k), // 7
+        };
+
+#define QUAD(a, b, c, d) a, b, c, a, c, d
+        unsigned int indices[] =
+        {
+            QUAD(0, 1, 2, 3), // front
+            QUAD(1, 5, 6, 2), // right
+            QUAD(5, 4, 7, 6), // back
+            QUAD(4, 0, 3, 7), // left
+            QUAD(3, 2, 6, 7), // top
+            QUAD(4, 5, 1, 0), // bottom
+        };
+#undef QUAD
+
+        VertexFormat fmt = {};
+        AddVertexAttribute(fmt, 0, 3, GL_FLOAT, false);
+
+        GLuint vertex_buffer = CreateVertexBuffer(sizeof(verts), verts);
+        GLuint index_buffer = CreateIndexBuffer(sizeof(indices), indices);
+        GLuint vertex_array = CreateVertexArray(vertex_buffer, fmt, index_buffer);
+
+        cube.shader = shader;
+        cube.vertex_array = vertex_array;
+        cube.primitive_mode = GL_TRIANGLES;
+        cube.index_type = GL_UNSIGNED_INT;
+        cube.first = 0;
+        cube.count = ArrayCount(indices);
+        cube.draw_arrays = false;
+    }
 
     // Start looping
     //
@@ -116,6 +174,7 @@ int main(int argc, char **argv)
         // Render
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
+        Draw(cube);
 
         SDL_GL_SwapWindow(window);
         SDL_Delay(10);
