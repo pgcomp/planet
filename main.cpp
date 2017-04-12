@@ -29,10 +29,13 @@ int main(int argc, char **argv)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
 
+    int window_w = 800;
+    int window_h = 600;
+
     SDL_Window *window = SDL_CreateWindow("Test",
                                           SDL_WINDOWPOS_UNDEFINED,
                                           SDL_WINDOWPOS_UNDEFINED,
-                                          800, 600,
+                                          window_w, window_h,
                                           SDL_WINDOW_OPENGL);
 
     if (window == nullptr)
@@ -84,10 +87,27 @@ int main(int argc, char **argv)
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 
+    glPolygonMode(GL_FRONT, GL_LINE);
+
+    Mat4 proj;
+    {
+        float fovy = DegToRad(50.0f);
+        float aspect = (float)window_w/window_h;
+        proj = Mat4PerspectiveLH(fovy, aspect, 0.1f, 100.0f);
+    }
+
+    struct
+    {
+        Vec3 position;
+        Vec3 angles;
+    } cam = {};
+
     const char *shader_source =
         GLSL(ATTRIBUTE(vec3, Position, 0);
+             uniform mat4 Projection;
+             uniform mat4 View;
              void main() {
-             gl_Position = vec4(Position.xy, 0.0, 1.0);
+             gl_Position = Projection * View * vec4(Position, 1.0);
              },
              void main() {
              gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
@@ -100,12 +120,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    Uniform uniforms[2];
+
     DrawItem cube = {};
     {
-        //Vec3f o = V3(2.0f, -1.5f, 5.0f);
-        Vec3f o = V3(0.0f);
+        Vec3 o = V3(2.0f, -1.5f, 10.0f);
+        //Vec3 o = V3(0.0f);
         float k = 1.0f;
-        Vec3f verts[] =
+        Vec3 verts[] =
         {
             o + V3(-k, -k, -k), // 0
             o + V3( k, -k, -k), // 1
@@ -137,8 +159,13 @@ int main(int argc, char **argv)
         GLuint index_buffer = CreateIndexBuffer(sizeof(indices), indices);
         GLuint vertex_array = CreateVertexArray(vertex_buffer, fmt, index_buffer);
 
+        InitUniform(uniforms[0], shader, "Projection", proj);
+        InitUniform(uniforms[1], shader, "View", Mat4Identity());
+
         cube.shader = shader;
         cube.vertex_array = vertex_array;
+        cube.uniform_count = ArrayCount(uniforms);
+        cube.uniforms = uniforms;
         cube.primitive_mode = GL_TRIANGLES;
         cube.index_type = GL_UNSIGNED_INT;
         cube.first = 0;
@@ -148,6 +175,7 @@ int main(int argc, char **argv)
 
     // Start looping
     //
+    Uint32 last_t = SDL_GetTicks();
     bool running = true;
 
     while (running)
@@ -170,6 +198,37 @@ int main(int argc, char **argv)
                 }
             }
         }
+
+        const Uint8 *keys = SDL_GetKeyboardState(nullptr);
+
+        float dt;
+        {
+            Uint32 ticks = SDL_GetTicks();
+            Uint32 delta = ticks - last_t;
+            last_t = ticks;
+            dt = delta / 1000.0;
+        }
+
+        float move_speed = 3.0f; // m/s
+        float look_speed = 2.0f; // rad/s
+
+        Vec3 move = V3(keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A], 0,
+                       keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S]);
+        Vec3 look = V3(keys[SDL_SCANCODE_DOWN] - keys[SDL_SCANCODE_UP],
+                       keys[SDL_SCANCODE_RIGHT] - keys[SDL_SCANCODE_LEFT], 0);
+
+        cam.angles += look * look_speed * dt;
+
+        Mat3 rotation = (Mat3RotationY(cam.angles.y) *
+                         Mat3RotationX(cam.angles.x) *
+                         Mat3RotationZ(cam.angles.z));
+
+        cam.position += (V3(rotation[0]) * move.x +
+                         V3(rotation[1]) * move.y +
+                         V3(rotation[2]) * move.z) * move_speed * dt;
+
+        Mat4 view = Mat4ComposeTR(rotation, cam.position);
+        uniforms[1].value.m4 = Mat4InverseTR(view);
 
         // Render
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);

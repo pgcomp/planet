@@ -2,6 +2,7 @@
 #define RENDER_H
 
 #include <GL/glew.h>
+#include "math.h"
 
 #define GLSL(vs, fs) \
 "#if defined(VERTEX_SHADER)\n" #vs "\n#else\n" #fs "\n#endif\n"
@@ -24,10 +25,30 @@ struct VertexFormat
 };
 
 
+struct Uniform
+{
+    enum Type
+    {
+        LIST_END, FLOAT, VEC3, MAT4
+    };
+
+    GLint loc;
+    Type type;
+    union
+    {
+        float f;
+        Vec3  v3;
+        Mat4  m4;
+        float data[1];
+    } value;
+};
+
 struct DrawItem
 {
     GLuint shader;
     GLuint vertex_array;
+    Uniform *uniforms;
+    int uniform_count;
     GLenum primitive_mode;
     GLenum index_type;
     int first;
@@ -48,6 +69,10 @@ GLuint CreateVertexArray(GLuint vertex_buffer, VertexFormat &format,
 // Shaders
 
 GLuint CreateShaderFromSource(const char *source);
+
+void InitUniform(Uniform &u, GLuint shader, const char *name, float value);
+void InitUniform(Uniform &u, GLuint shader, const char *name, Vec3 value);
+void InitUniform(Uniform &u, GLuint shader, const char *name, const Mat4 &value);
 
 // Draw
 

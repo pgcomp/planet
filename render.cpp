@@ -214,6 +214,27 @@ GLuint CreateShaderFromSource(const char *source)
     return {};
 }
 
+void InitUniform(Uniform &u, GLuint shader, const char *name, float value)
+{
+    u.loc = glGetUniformLocation(shader, name);
+    u.type = Uniform::FLOAT;
+    u.value.f = value;
+}
+
+void InitUniform(Uniform &u, GLuint shader, const char *name, Vec3 value)
+{
+    u.loc = glGetUniformLocation(shader, name);
+    u.type = Uniform::VEC3;
+    u.value.v3 = value;
+}
+
+void InitUniform(Uniform &u, GLuint shader, const char *name, const Mat4 &value)
+{
+    u.loc = glGetUniformLocation(shader, name);
+    u.type = Uniform::MAT4;
+    u.value.m4 = value;
+}
+
 // Draw
 
 inline int GetIndexTypeSize(GLenum type)
@@ -230,6 +251,20 @@ void Draw(DrawItem &d)
 {
     glUseProgram(d.shader);
     glBindVertexArray(d.vertex_array);
+
+    for (int i = 0; i < d.uniform_count; i++)
+    {
+        Uniform &u = d.uniforms[i];
+        switch (u.type)
+        {
+            case Uniform::FLOAT: glUniform1fv(u.loc, 1, u.value.data); break;
+            case Uniform::VEC3:  glUniform3fv(u.loc, 3, u.value.data); break;
+            case Uniform::MAT4:
+            glUniformMatrix4fv(u.loc, 1, GL_FALSE, u.value.data); break;
+            default: assert(0 && "Invalid uniform type!");
+        }
+    }
+
     if (d.draw_arrays)
     {
         glDrawArrays(d.primitive_mode, d.first, d.count);
