@@ -14,36 +14,34 @@
 #define Cos(rad) std::cos(rad)
 #define Tan(rad) std::tan(rad)
 #define SinCos(rad, si, co) sincosf(rad, si, co)
+#define ACos(x) std::acos(x)
 #define DegToRad(deg) ((deg) * 0.01745329251994329576923690768489)
 
 template<class T> inline T Square(T x) { return x*x; }
 
-// Vec3
+// Vec2
 
-typedef float real;
-
-struct Vec3
+struct Vec2
 {
-    real x, y, z;
-
-    inline Vec3 &operator+=(Vec3 v) { x+=v.x; y+=v.y; z+=v.z; return *this; }
-    inline Vec3 &operator-=(Vec3 v) { x-=v.x; y-=v.y; z-=v.z; return *this; }
-    inline Vec3 &operator*=(real r) { x *= r; y *= r; z *= r; return *this; }
-    inline Vec3 &operator/=(real r) { x /= r; y /= r; z /= r; return *this; }
+    float x, y;
 };
 
-// operators
+inline Vec2 V2(float x, float y)
+{
+    Vec2 result;
+    result.x = x;
+    result.y = y;
+    return result;
+}
 
-inline Vec3 operator+(Vec3 a, Vec3 b) { return a += b; }
-inline Vec3 operator-(Vec3 a, Vec3 b) { return a -= b; }
-inline Vec3 operator*(Vec3 a, real b) { return a *= b; }
-inline Vec3 operator*(real a, Vec3 b) { return b *= a; }
-inline Vec3 operator/(Vec3 a, real b) { return a /= b; }
-inline Vec3 operator-(Vec3 v) { return v *= -1.0f; }
+// Vec3 and Vec3d
 
-// functions
+#include "vec3.h"
+#define vec3_t Vec3d
+#define real_t double
+#include "vec3.h"
 
-inline Vec3 V3(real x, real y, real z)
+inline Vec3 V3(float x, float y, float z)
 {
     Vec3 result;
     result.x = x;
@@ -52,21 +50,19 @@ inline Vec3 V3(real x, real y, real z)
     return result;
 }
 
-inline Vec3 V3(real s)          { return V3(s, s, s); }
-inline Vec3 V3(const real *v)   { return V3(v[0], v[1], v[2]); }
-inline real Dot(Vec3 a, Vec3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
-inline real LengthSq(Vec3 v)    { return Dot(v, v); }
-inline real Length(Vec3 v)      { return Sqrt(LengthSq(v)); }
-inline Vec3 Normalize(Vec3 v)   { return v / Length(v); }
+inline Vec3 V3(float s) { return V3(s, s, s); }
+inline Vec3 V3(const float *v) { return V3(v[0], v[1], v[2]); }
 
-inline Vec3 SafeNormalize(Vec3 v, real epsilon = 0.0001)
+inline Vec3d V3d(double x, double y, double z)
 {
-    real len2 = LengthSq(v);
-    if (len2 < epsilon)
-        return V3(0.0);
-    return v / Sqrt(len2);
+    Vec3d result;
+    result.x = x;
+    result.y = y;
+    result.z = z;
+    return result;
 }
 
+inline Vec3d V3d(const float *v) { return V3d(v[0], v[1], v[2]); }
 
 // Mat3
 
@@ -211,6 +207,7 @@ inline Mat4 Mat4ComposeTR(const Mat3 &R, Vec3 T)
     Mat4 result = {};
     Mat4SetRotation(result, R);
     Mat4SetTranslation(result, T);
+    result[3][3] = 1.0f;
     return result;
 }
 

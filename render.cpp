@@ -209,29 +209,38 @@ GLuint CreateShaderFromSource(const char *source)
 
     char info[256];
     glGetProgramInfoLog(p, 256, 0, info);
-    LOG_ERROR("CreateShader() failed:\n%s\n", info);
+    LOG_ERROR("Couldn't link shader:\n%s\n", info);
     glDeleteProgram(p);
     return {};
 }
 
-void InitUniform(Uniform &u, GLuint shader, const char *name, float value)
+inline void InitUniformCommon(Uniform &u, GLuint shader, const char *name,
+                              Uniform::Type type)
 {
     u.loc = glGetUniformLocation(shader, name);
-    u.type = Uniform::FLOAT;
+    u.type = type;
+
+    if (u.loc < 0)
+    {
+        LOG_WARNING("Uniform named '%s' not found.", name);
+    }
+}
+
+void InitUniform(Uniform &u, GLuint shader, const char *name, float value)
+{
+    InitUniformCommon(u, shader, name, Uniform::FLOAT);
     u.value.f = value;
 }
 
 void InitUniform(Uniform &u, GLuint shader, const char *name, Vec3 value)
 {
-    u.loc = glGetUniformLocation(shader, name);
-    u.type = Uniform::VEC3;
+    InitUniformCommon(u, shader, name, Uniform::VEC3);
     u.value.v3 = value;
 }
 
 void InitUniform(Uniform &u, GLuint shader, const char *name, const Mat4 &value)
 {
-    u.loc = glGetUniformLocation(shader, name);
-    u.type = Uniform::MAT4;
+    InitUniformCommon(u, shader, name, Uniform::MAT4);
     u.value.m4 = value;
 }
 
@@ -258,7 +267,7 @@ void Draw(DrawItem &d)
         switch (u.type)
         {
             case Uniform::FLOAT: glUniform1fv(u.loc, 1, u.value.data); break;
-            case Uniform::VEC3:  glUniform3fv(u.loc, 3, u.value.data); break;
+            case Uniform::VEC3:  glUniform3fv(u.loc, 1, u.value.data); break;
             case Uniform::MAT4:
             glUniformMatrix4fv(u.loc, 1, GL_FALSE, u.value.data); break;
             default: assert(0 && "Invalid uniform type!");
@@ -272,6 +281,6 @@ void Draw(DrawItem &d)
     else
     {
         void *offset = (char*)0 + d.first * GetIndexTypeSize(d.index_type);
-        glDrawElements(GL_TRIANGLES, d.count, d.index_type, offset);
+        glDrawElements(d.primitive_mode, d.count, d.index_type, offset);
     }
 }

@@ -29,7 +29,7 @@ struct Uniform
 {
     enum Type
     {
-        LIST_END, FLOAT, VEC3, MAT4
+        FLOAT, VEC3, MAT4
     };
 
     GLint loc;
@@ -69,6 +69,11 @@ GLuint CreateVertexArray(GLuint vertex_buffer, VertexFormat &format,
 // Shaders
 
 GLuint CreateShaderFromSource(const char *source);
+
+inline int GetUniformCountFromSize(unsigned int size)
+{
+    return size / sizeof(Uniform);
+}
 
 void InitUniform(Uniform &u, GLuint shader, const char *name, float value);
 void InitUniform(Uniform &u, GLuint shader, const char *name, Vec3 value);
