@@ -16,6 +16,7 @@
 #define SinCos(rad, si, co) sincosf(rad, si, co)
 #define ACos(x) std::acos(x)
 #define DegToRad(deg) ((deg) * 0.01745329251994329576923690768489)
+#define Log2(x) std::log2(x)
 
 template<class T> inline T Square(T x) { return x*x; }
 

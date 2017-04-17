@@ -56,5 +56,14 @@ inline vec3_t SafeNormalize(vec3_t v, real_t epsilon = 0.0001)
     return v / Sqrt(len2);
 }
 
+inline vec3_t Cross(vec3_t a, vec3_t b)
+{
+    vec3_t result;
+    result.x = a.y*b.z - a.z*b.y;
+    result.y = a.z*b.x - a.x*b.z;
+    result.z = a.x*b.y - a.y*b.x;
+    return result;
+}
+
 #undef vec3_t
 #undef real_t

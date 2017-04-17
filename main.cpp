@@ -13,19 +13,15 @@ inline Vec3 Slerp(Vec3 a, Vec3 b, float t)
     return (Sin((1.0f - t)*theta)*a + Sin(t*theta)*b) / Sin(theta);
 }
 
-struct QVert
-{
-    Vec3d p, n;
-};
-
 struct Quad
 {
-    QVert verts[4];
+    Vec3d p[4];
 };
 
 struct Planet
 {
     double radius;
+    int max_splits;
     DrawItem patch;
     struct
     {
@@ -162,6 +158,11 @@ bool InitPlanet(Planet &p, double radius)
 
     p.radius = radius;
 
+    // l = log_2(2*pi*r/q) - 2
+    p.max_splits = Log2(2.0*PI*radius/patch_size_in_quads) - 2;
+    printf("%d\n", p.max_splits);
+    fflush(stdout);
+
     DrawItem &d = p.patch;
     d.shader = shader;
     d.vertex_array = vertex_array;
@@ -176,90 +177,137 @@ bool InitPlanet(Planet &p, double radius)
     return true;
 }
 
-void ProcessQuad(Planet &p, const Quad &q, int depth)
+struct CameraInfo
 {
-    if (depth == 3)
+    Vec3d position;
+    Mat3 rotation;
+    float proj_factor;
+    float aspect_ratio;
+    float near_plane;
+    float far_plane;
+};
+
+void InitCameraInfo(CameraInfo &info, float fovy_rad, float aspect_ratio,
+                    float near_plane, float far_plane)
+{
+    info.proj_factor = 1.0f/Tan(0.5*fovy_rad);
+    info.aspect_ratio = aspect_ratio;
+    info.near_plane = near_plane;
+    info.far_plane = far_plane;
+}
+
+void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int splits)
+{
+    if (splits == 0)
     {
+        // No more splitting
         ListAdd(p.quads, q);
         return;
     }
 
-    Vec3d normals[] =
+    Vec3d mid = Normalize(q.p[0] + q.p[1] + q.p[2] + q.p[3]) * p.radius;
+
+    // Let's assume the quad is a screen aligned square.
+    // s = side of the square
+    // pf = 1.0/Tan(fovy)
+    // ar = aspect ratio
+    // z = distance to the camera
+    // The area of the NDC square is
+    // A = (s*pf/ar/z) * (s*pf/z) = (s^2)*(pf^2/ar)/(z^2)
+
+    // Diagonals
+    Vec3d d1 = q.p[3] - q.p[0];
+    Vec3d d2 = q.p[2] - q.p[1];
+
+    // Diagonal is about sqrt(2) times the side.
+    double avg_diagonal_sq = (LengthSq(d1) + LengthSq(d2)) * 0.5;
+    double side_sq = avg_diagonal_sq * 0.5; // (diag/sqrt(2))^2 = (diag^2)/2
+    double dist_sq = LengthSq(mid - cam.position);
+    double f = Square(cam.proj_factor) / cam.aspect_ratio;
+
+    double ndc_area = side_sq*f / dist_sq;
+    double ndc_screen_area = Square(2.0);
+
+    if (ndc_area < 0.5*ndc_screen_area)
     {
-        Normalize(q.verts[0].p + q.verts[1].p),
-        Normalize(q.verts[0].p + q.verts[2].p),
-        Normalize(q.verts[0].p + q.verts[1].p + q.verts[2].p + q.verts[3].p),
-        Normalize(q.verts[1].p + q.verts[3].p),
-        Normalize(q.verts[2].p + q.verts[3].p),
+        // No need to split
+        ListAdd(p.quads, q);
+        return;
+    }
+
+    // Do split
+
+#define VERT(i, j) Normalize(q.p[i] + q.p[j]) * p.radius
+#define QUAD(a, b, c, d) (Quad){verts[a], verts[b], verts[c], verts[d]}
+
+    Vec3d verts[] =
+    {
+        q.p[0], VERT(0, 1), q.p[1],
+        VERT(0, 2), mid, VERT(1, 3),
+        q.p[2], VERT(2, 3), q.p[3],
     };
 
-#define VERT(n) { normals[n] * p.radius, normals[n] }
-#define QUAD(a, b, c, d) {verts[a], verts[b], verts[c], verts[d]}
-
-    QVert verts[] =
-    {
-        q.verts[0], VERT(0), q.verts[1],
-        VERT(1),    VERT(2), VERT(3),
-        q.verts[2], VERT(4), q.verts[3],
-    };
-
-    Quad children[] =
-    {
-        QUAD(0, 1, 3, 4),
-        QUAD(1, 2, 4, 5),
-        QUAD(3, 4, 6, 7),
-        QUAD(4, 5, 7, 8),
-    };
+    ProcessQuad(p, QUAD(0, 1, 3, 4), cam, splits - 1);
+    ProcessQuad(p, QUAD(1, 2, 4, 5), cam, splits - 1);
+    ProcessQuad(p, QUAD(3, 4, 6, 7), cam, splits - 1);
+    ProcessQuad(p, QUAD(4, 5, 7, 8), cam, splits - 1);
 
 #undef VERT
 #undef QUAD
-
-    for (int i = 0; i < 4; i++)
-    {
-        ProcessQuad(p, children[i], depth + 1);
-    }
 }
 
-void RenderPlanet(Planet &p, const Mat4 &proj, const Mat4 &view,
-                  Vec3d eye_position)
+void RenderPlanet(Planet &p, const CameraInfo &cam)
 {
-    Vec3d normals[] =
+    ListResize(p.quads, 0);
+
+#define VERT(x, y, z) Normalize(V3d(x, y, z)) * p.radius
+#define QUAD(a, b, c, d) (Quad){verts[a], verts[b], verts[d], verts[c]}
+
+    Vec3d verts[] =
     {
-        Normalize(V3d(-1, -1, -1)), // 0
-        Normalize(V3d( 1, -1, -1)), // 1
-        Normalize(V3d( 1,  1, -1)), // 2
-        Normalize(V3d(-1,  1, -1)), // 3
-        Normalize(V3d(-1, -1,  1)), // 4
-        Normalize(V3d( 1, -1,  1)), // 5
-        Normalize(V3d( 1,  1,  1)), // 6
-        Normalize(V3d(-1,  1,  1)), // 7
+        VERT(-1, -1, -1), // 0
+        VERT( 1, -1, -1), // 1
+        VERT( 1,  1, -1), // 2
+        VERT(-1,  1, -1), // 3
+        VERT(-1, -1,  1), // 4
+        VERT( 1, -1,  1), // 5
+        VERT( 1,  1,  1), // 6
+        VERT(-1,  1,  1), // 7
     };
 
-#define VERT(n) { normals[n] * p.radius, normals[n] }
-#define QUAD(a, b, c, d) {{VERT(a), VERT(b), VERT(d), VERT(c)}}
+    int max_splits = p.max_splits;
 
-    Quad root_quads[] =
-    {
-        QUAD(0, 1, 2, 3), // front
-        QUAD(1, 5, 6, 2), // right
-        QUAD(5, 4, 7, 6), // back
-        QUAD(4, 0, 3, 7), // left
-        QUAD(3, 2, 6, 7), // top
-        QUAD(4, 5, 1, 0), // bottom
-    };
+    ProcessQuad(p, QUAD(0, 1, 2, 3), cam, max_splits); // front
+    ProcessQuad(p, QUAD(1, 5, 6, 2), cam, max_splits); // right
+    ProcessQuad(p, QUAD(5, 4, 7, 6), cam, max_splits); // back
+    ProcessQuad(p, QUAD(4, 0, 3, 7), cam, max_splits); // left
+    ProcessQuad(p, QUAD(3, 2, 6, 7), cam, max_splits); // top
+    ProcessQuad(p, QUAD(4, 5, 1, 0), cam, max_splits); // bottom
 
 #undef VERT
 #undef QUAD
 
-    ListResize(p.quads, 0);
-
-    int num_roots = ArrayCount(root_quads);
-    for (int i = 0; i < num_roots; i++)
+    Mat4 projection = {};
     {
-        ProcessQuad(p, root_quads[i], 1);
+        double f = cam.far_plane;
+        double n = cam.near_plane;
+
+        projection[0][0] = cam.proj_factor/cam.aspect_ratio;
+        projection[1][1] = cam.proj_factor;
+        projection[2][2] = (f + n) / (f - n);
+        projection[2][3] = 1.0;
+        projection[3][2] = -2.0*f*n / (f - n);
     }
 
-    p.uniforms.proj.value.m4 = proj;
+    Mat4 view = {};
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+            view[i][j] = cam.rotation[j][i];
+    }
+    view[3][3] = 1.0f;
+
+    p.uniforms.proj.value.m4 = projection;
     p.uniforms.view.value.m4 = view;
 
     for (int i = 0; i < p.quads.num; ++i)
@@ -267,8 +315,8 @@ void RenderPlanet(Planet &p, const Mat4 &proj, const Mat4 &view,
         Quad &q = p.quads.data[i];
         for (int j = 0; j < 4; ++j)
         {
-            Vec3d e = q.verts[j].p - eye_position;
-            Vec3d n = q.verts[j].n;
+            Vec3d e = q.p[j] - cam.position;
+            Vec3d n = Normalize(q.p[j]);
             p.uniforms.p[j].value.v3 = V3(e.x, e.y, e.z);
             p.uniforms.n[j].value.v3 = V3(n.x, n.y, n.z);
         }
@@ -360,11 +408,12 @@ int main(int argc, char **argv)
 
     glPolygonMode(GL_FRONT, GL_LINE);
 
-    Mat4 proj;
+    double radius = 6371000.0;
+
+    Planet planet = {};
+    if (!InitPlanet(planet, radius))
     {
-        float fovy = DegToRad(50.0f);
-        float aspect = (float)window_w/window_h;
-        proj = Mat4PerspectiveLH(fovy, aspect, 1.0f, 1000.0f);
+        return 1;
     }
 
     struct
@@ -373,13 +422,8 @@ int main(int argc, char **argv)
         Vec3 angles;
     } cam = {};
 
-    cam.position.z = -200.0;
+    cam.position.z = -radius * 1.2;
 
-    Planet planet = {};
-    if (!InitPlanet(planet, 100.0))
-    {
-        return 1;
-    }
 
     // Start looping
     //
@@ -417,11 +461,11 @@ int main(int argc, char **argv)
             dt = delta / 1000.0;
         }
 
-        double move_speed = 30.0; // m/s
+        double move_speed = 3000.0; // m/s
         float look_speed = 2.0f; // rad/s
 
         if (keys[SDL_SCANCODE_LSHIFT])
-            move_speed = 100.0;
+            move_speed *= 100.0;
 
         Vec3d move = V3d(keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A], 0,
                          keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S]);
@@ -430,6 +474,7 @@ int main(int argc, char **argv)
 
         cam.angles += look * look_speed * dt;
 
+        // TODO: 6 degrees of freedom
         Mat3 rotation = (Mat3RotationY(cam.angles.y) *
                          Mat3RotationX(cam.angles.x) *
                          Mat3RotationZ(cam.angles.z));
@@ -438,13 +483,23 @@ int main(int argc, char **argv)
                          V3d(rotation[1]) * move.y +
                          V3d(rotation[2]) * move.z) * move_speed * dt;
 
-        Mat4 view = Mat4ComposeTR(rotation, V3(0.0f));
-        view = Mat4InverseTR(view);
+        float fovy = DegToRad(50.0f);
+        float aspect = (float)window_w/window_h;
+        float near = 10.0f;
+        float far = 8000000.0f;
+
+        CameraInfo cam_info;
+        cam_info.position = cam.position;
+        cam_info.rotation = rotation;
+        cam_info.proj_factor = 1.0f/Tan(0.5f*fovy);
+        cam_info.aspect_ratio = aspect;
+        cam_info.near_plane = near;
+        cam_info.far_plane = far;
 
         // Render
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
-        RenderPlanet(planet, proj, view, cam.position);
+        RenderPlanet(planet, cam_info);
 
         SDL_GL_SwapWindow(window);
         SDL_Delay(10);
