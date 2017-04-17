@@ -24,6 +24,7 @@ struct Planet
     double radius;
     int max_lod;
     DrawItem patch;
+    Texture hmap;
     struct
     {
         Uniform proj;
@@ -39,6 +40,8 @@ bool InitPlanet(Planet &p, double radius)
 {
     const char *shader_source =
         GLSL(ATTRIBUTE(vec2, UV, 0);
+
+             SAMPLER(sampler2D, HeightMap, 0);
 
              uniform mat4 Projection;
              uniform mat4 View;
@@ -89,6 +92,8 @@ bool InitPlanet(Planet &p, double radius)
              V p = interpolate(a, b, UV.x);
              V q = interpolate(c, d, UV.x);
              V v = interpolate(p, q, UV.y);
+             float h = texture(HeightMap, UV).r * 10.0;
+             v.p += h*v.n;
              gl_Position = Projection * View * vec4(v.p, 1.0);
              },
 
@@ -162,6 +167,19 @@ bool InitPlanet(Planet &p, double radius)
     GLuint index_buffer = CreateIndexBuffer(sizeof(indices), indices);
     GLuint vertex_array = CreateVertexArray(vertex_buffer, vf, index_buffer);
 
+    const int tex_size = patch_size_in_verts + 2;
+    const int tex_data_size = Square(tex_size);
+    float tex_data[tex_data_size];
+    for (int i = 0; i < tex_data_size; i++)
+    {
+        tex_data[i] = Sin(i*0.31f + 0.121f) + Cos(i*1.91f + 5.02f);
+    }
+
+    GLuint height_map = CreateTexture2D(tex_size, tex_size,
+                                        GL_RED, GL_FLOAT, tex_data);
+    p.hmap.texture = height_map;
+    p.hmap.bind_index = 0;
+
     InitUniform(p.uniforms.proj, shader, "Projection", Mat4Identity());
     InitUniform(p.uniforms.view, shader, "View", Mat4Identity());
     for (int i = 0; i < 4; ++i)
@@ -181,6 +199,8 @@ bool InitPlanet(Planet &p, double radius)
     DrawItem &d = p.patch;
     d.shader = shader;
     d.vertex_array = vertex_array;
+    d.textures = &p.hmap;
+    d.texture_count = 1;
     d.uniforms = &p.uniforms.proj;
     d.uniform_count = GetUniformCountFromSize(sizeof(p.uniforms));
     d.primitive_mode = GL_TRIANGLE_STRIP;

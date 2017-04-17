@@ -24,6 +24,11 @@ struct VertexFormat
     Attribute attributes[MAX_VERTEX_ATTRIBUTES];
 };
 
+struct Texture
+{
+    GLuint texture;
+    int bind_index;
+};
 
 struct Uniform
 {
@@ -47,7 +52,9 @@ struct DrawItem
 {
     GLuint shader;
     GLuint vertex_array;
+    Texture *textures;
     Uniform *uniforms;
+    int texture_count;
     int uniform_count;
     GLenum primitive_mode;
     GLenum index_type;
@@ -78,6 +85,11 @@ inline int GetUniformCountFromSize(unsigned int size)
 void InitUniform(Uniform &u, GLuint shader, const char *name, float value);
 void InitUniform(Uniform &u, GLuint shader, const char *name, Vec3 value);
 void InitUniform(Uniform &u, GLuint shader, const char *name, const Mat4 &value);
+
+// Textures
+
+GLuint CreateTexture2D(unsigned int w, unsigned int h, GLenum fmt,
+                       GLenum type, const void *data);
 
 // Draw
 

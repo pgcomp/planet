@@ -88,7 +88,8 @@ GLuint CompileShader(GLenum type, const char *source)
     {
         source_list[1] =
             "#define VERTEX_SHADER\n"
-            "#define ATTRIBUTE(type, name, index) in type name\n";
+            "#define ATTRIBUTE(type, name, index) in type name\n"
+            "#define SAMPLER(type, name, index) uniform type name\n";
     }
 
     GLuint shader = glCreateShader(type);
@@ -108,12 +109,168 @@ GLuint CompileShader(GLenum type, const char *source)
 }
 
 // Parse utils
-inline bool IsSpace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 inline bool IsAlpha(char c) { return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z'); }
 inline bool IsNumber(char c) { return '0' <=c && c <= '9'; }
 inline bool IsAlphaNum(char c) { return IsAlpha(c) || IsNumber(c); }
 inline bool IsIdent(char c) { return IsAlphaNum(c) || c == '_'; }
-inline const char *SkipSpace(const char *s) { while (*s && IsSpace(*s)) s++; return s; }
+
+struct Token
+{
+    enum Type
+    {
+        END, IDENT, NUMBER, COMMA, OPAREN, CPAREN
+    };
+
+    Type type;
+    const char *str;
+    union
+    {
+        int number;
+        int len;
+    };
+};
+
+struct Tokenizer
+{
+    const char *at;
+};
+
+Token GetNextToken(Tokenizer &tokenizer)
+{
+    Token result = {};
+
+    do
+    {
+        switch (*tokenizer.at)
+        {
+            case '\0':
+            {
+                break;
+            }
+
+            case 'a'...'z':
+            case 'A'...'Z':
+            case '_':
+            {
+                result.type = Token::IDENT;
+                result.str = tokenizer.at;
+                while (IsIdent(*tokenizer.at))
+                    tokenizer.at++;
+                result.len = tokenizer.at - result.str;
+                break;
+            }
+
+            case '0'...'9':
+            {
+                result.type = Token::NUMBER;
+                while (IsNumber(*tokenizer.at))
+                {
+                    result.number *= 10;
+                    result.number += (*tokenizer.at - '0');
+                    tokenizer.at++;
+                }
+                break;
+            }
+
+            case ',':
+            {
+                result.type = Token::COMMA;
+                tokenizer.at++;
+                break;
+            }
+
+            case '(':
+            {
+                result.type = Token::OPAREN;
+                tokenizer.at++;
+                break;
+            }
+
+            case ')':
+            {
+                result.type = Token::CPAREN;
+                tokenizer.at++;
+                break;
+            }
+
+            default:
+            {
+                tokenizer.at++;
+                continue;
+            }
+        }
+    } while (0);
+
+    return result;
+}
+
+inline bool ExpectToken(Tokenizer &tokenizer, Token::Type type, Token &token)
+{
+    token = GetNextToken(tokenizer);
+    if (token.type != type)
+    {
+        LOG_WARNING("When parsing shader source: Unexpected token.");
+        return false;
+    }
+    return true;
+}
+
+inline bool ExpectToken(Tokenizer &tokenizer, Token::Type type)
+{
+    Token token;
+    return ExpectToken(tokenizer, type, token);
+}
+
+struct ParseItem
+{
+    bool is_attribute;
+    const char *name;
+    int name_len;
+    int index;
+};
+
+int ParseAttributesAndSamplers(const char *source, int max, ParseItem *items)
+{
+    int count = 0;
+
+    Tokenizer tokenizer = {source};
+
+    while (1)
+    {
+        Token token = GetNextToken(tokenizer);
+
+        if (token.type == Token::END)   { break; }
+        if (token.type != Token::IDENT) { continue; }
+
+        bool attribute = strncmp(token.str, "ATTRIBUTE", token.len) == 0;
+        if (attribute || strncmp(token.str, "SAMPLER", token.len) == 0)
+        {
+            Token name, index;
+
+            if (!ExpectToken(tokenizer, Token::OPAREN))        { continue; }
+            if (!ExpectToken(tokenizer, Token::IDENT))         { continue; }
+            if (!ExpectToken(tokenizer, Token::COMMA))         { continue; }
+            if (!ExpectToken(tokenizer, Token::IDENT, name))   { continue; }
+            if (!ExpectToken(tokenizer, Token::COMMA))         { continue; }
+            if (!ExpectToken(tokenizer, Token::NUMBER, index)) { continue; }
+            if (!ExpectToken(tokenizer, Token::CPAREN))        { continue; }
+
+            if (count == max)
+            {
+                LOG_ERROR("Too many items.");
+                continue;
+            }
+
+            ParseItem &item = items[count++];
+            item.is_attribute = attribute;
+            item.name = name.str;
+            item.name_len = name.len;
+            item.index = index.number;
+        }
+    }
+
+    return count;
+}
 
 GLuint CreateShaderFromSource(const char *source)
 {
@@ -127,73 +284,32 @@ GLuint CreateShaderFromSource(const char *source)
 
     GLuint p = glCreateProgram();
 
-    // Parse attributes
-    // NOTE: We can be sloppy because the source has passed the compilation
-    char prev = '\0';
-    for (const char *c = source; *c; c++)
+    // Parse attributes and samplers
+    const int max_items = MAX_VERTEX_ATTRIBUTES + 32;
+    ParseItem items[max_items];
+    int item_count = ParseAttributesAndSamplers(source, max_items, items);
+
+    for (int i = 0; i < item_count; i++)
     {
-        if (*c == 'A' && !IsIdent(prev))
+        ParseItem &item = items[i];
+        if (item.is_attribute)
         {
-            const char *ATTRIBUTE = "ATTRIBUTE";
-            while (*ATTRIBUTE && *c == *ATTRIBUTE)
+            char name[64] = {};
+            if (item.name_len >= (int)sizeof(name))
             {
-                ATTRIBUTE++;
-                c++;
+                LOG_ERROR("Vertex attribute name too long.");
+                continue;
+            }
+            if (item.index >= MAX_VERTEX_ATTRIBUTES)
+            {
+                LOG_ERROR("Expected attribute index between 0-%d.",
+                          MAX_VERTEX_ATTRIBUTES - 1);
+                continue;
             }
 
-            if (*ATTRIBUTE == '\0')
-            {
-                c = SkipSpace(c);
-                if (*c == '(')
-                {
-                    // Sloppy: not checking eof
-                    // skip attribute type
-                    while (*c++ != ','); // skips the comma automatically
-                    // parse attribute name
-                    c = SkipSpace(c);
-                    const char *name = c;
-                    while (IsIdent(*c)) c++;
-                    int name_len = c - name;
-                    while (*c++ != ','); // skips the comma automatically
-                    // parse attribute index
-                    c = SkipSpace(c);
-                    int index = 0;
-                    bool is_num = IsNumber(*c);
-                    while (IsNumber(*c))
-                    {
-                        index *= 10;
-                        index += *c - '0';
-                        c++;
-                    }
-                    while (*c++ != ')'); // skips the paren automatically
-
-                    do {
-                        char buf[64];
-                        if (0 < name_len && name_len < (int)sizeof(buf))
-                        {
-                            memcpy(buf, name, name_len);
-                            buf[name_len] = '\0';
-                        }
-                        else
-                        {
-                            LOG_ERROR("Vertex attribute name too long.");
-                            break;
-                        }
-                        if (!is_num || index >= MAX_VERTEX_ATTRIBUTES)
-                        {
-                            LOG_ERROR("Expected attribute index between 0-%d.",
-                                      MAX_VERTEX_ATTRIBUTES);
-                            break;
-                        }
-                        glBindAttribLocation(p, index, buf);
-                    } while(0);
-                }
-            }
-
-            c--;
+            memcpy(name, item.name, item.name_len);
+            glBindAttribLocation(p, item.index, name);
         }
-
-        prev = *c;
     }
 
     glAttachShader(p, vs);
@@ -205,13 +321,41 @@ GLuint CreateShaderFromSource(const char *source)
     GLint status;
     glGetProgramiv(p, GL_LINK_STATUS, &status);
     if (status == GL_TRUE)
-        return {p};
+    {
+        glUseProgram(p);
+
+        for (int i = 0; i < item_count; i++)
+        {
+            ParseItem &item = items[i];
+            if (!item.is_attribute)
+            {
+                char name[64] = {};
+                if (item.name_len >= (int)sizeof(name))
+                {
+                    LOG_ERROR("Sampler name too long.");
+                    continue;
+                }
+                //if (item.index >= MAX_TEXTURE_SAMPLERS)
+                //{
+                //    LOG_ERROR("Expected sampler index between 0-%d.",
+                //              MAX_TEXTURE_SAMPLERS - 1);
+                //    continue;
+                //}
+
+                memcpy(name, item.name, item.name_len);
+                GLint loc = glGetUniformLocation(p, name);
+                glUniform1i(loc, item.index);
+            }
+        }
+
+        return p;
+    }
 
     char info[256];
     glGetProgramInfoLog(p, 256, 0, info);
     LOG_ERROR("Couldn't link shader:\n%s\n", info);
     glDeleteProgram(p);
-    return {};
+    return 0;
 }
 
 inline void InitUniformCommon(Uniform &u, GLuint shader, const char *name,
@@ -244,6 +388,25 @@ void InitUniform(Uniform &u, GLuint shader, const char *name, const Mat4 &value)
     u.value.m4 = value;
 }
 
+// Textures
+
+GLuint CreateTexture2D(unsigned int w, unsigned int h, GLenum fmt,
+                       GLenum type, const void *data)
+{
+    GLuint texture;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, fmt, w, h, 0, fmt, type, data);
+    // GL_NEAREST, GL_LINEAR, GL_NEAREST_MIPMAP_NEAREST
+    // GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return texture;
+}
+
 // Draw
 
 inline int GetIndexTypeSize(GLenum type)
@@ -260,6 +423,13 @@ void Draw(DrawItem &d)
 {
     glUseProgram(d.shader);
     glBindVertexArray(d.vertex_array);
+
+    for (int i = 0; i < d.texture_count; i++)
+    {
+        Texture &tex = d.textures[i];
+        glActiveTexture(GL_TEXTURE0 + tex.bind_index);
+        glBindTexture(GL_TEXTURE_2D, tex.texture);
+    }
 
     for (int i = 0; i < d.uniform_count; i++)
     {
