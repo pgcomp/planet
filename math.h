@@ -53,6 +53,7 @@ inline Vec3 V3(float x, float y, float z)
 
 inline Vec3 V3(float s) { return V3(s, s, s); }
 inline Vec3 V3(const float *v) { return V3(v[0], v[1], v[2]); }
+inline Vec3 V3(Vec3d v) { return V3(v.x, v.y, v.z); }
 
 inline Vec3d V3d(double x, double y, double z)
 {
@@ -143,6 +144,14 @@ inline Mat3 Mat3RotationZ(float rad)
     return result;
 }
 
+inline Mat3 Mat3FromBasisVectors(Vec3 x, Vec3 y, Vec3 z)
+{
+    Mat3 result;
+    result[0][0] = x.x; result[0][1] = x.y; result[0][2] = x.z;
+    result[1][0] = y.x; result[1][1] = y.y; result[1][2] = y.z;
+    result[2][0] = z.x; result[2][1] = z.y; result[2][2] = z.z;
+    return result;
+}
 
 // Mat4
 

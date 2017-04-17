@@ -16,12 +16,13 @@ inline Vec3 Slerp(Vec3 a, Vec3 b, float t)
 struct Quad
 {
     Vec3d p[4];
+    int lod;
 };
 
 struct Planet
 {
     double radius;
-    int max_splits;
+    int max_lod;
     DrawItem patch;
     struct
     {
@@ -29,6 +30,7 @@ struct Planet
         Uniform view;
         Uniform p[4];
         Uniform n[4];
+        Uniform color;
     } uniforms;
     List<Quad> quads;
 };
@@ -45,7 +47,20 @@ bool InitPlanet(Planet &p, double radius)
 
              struct V { vec3 p; vec3 n; };
 
+             V interpolate_linear(V v0, V v1, float t) {
+             vec3 n = normalize(mix(v0.n, v1.n, t));
+             vec3 p = mix(v0.p, v1.p, t);
+
+             V result;
+             result.p = p;
+             result.n = n;
+             return result;
+             }
+
              V interpolate(V v0, V v1, float t) {
+             if (1.0 - dot(v0.n, v1.n) < 0.001)
+             return interpolate_linear(v0, v1, t);
+
              // slerp normal
              float theta2 = acos(dot(v0.n, v1.n));
              float k = 1.0 - t;
@@ -77,8 +92,9 @@ bool InitPlanet(Planet &p, double radius)
              gl_Position = Projection * View * vec4(v.p, 1.0);
              },
 
+             uniform vec3 Color;
              void main() {
-             gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+             gl_FragColor = vec4(Color, 1.0);
              });
 
     GLuint shader = CreateShaderFromSource(shader_source);
@@ -155,13 +171,12 @@ bool InitPlanet(Planet &p, double radius)
         InitUniform(p.uniforms.p[i], shader, P, V3(0.0f));
         InitUniform(p.uniforms.n[i], shader, N, V3(0.0f));
     };
+    InitUniform(p.uniforms.color, shader, "Color", V3(0.0f));
 
     p.radius = radius;
 
     // l = log_2(2*pi*r/q) - 2
-    p.max_splits = Log2(2.0*PI*radius/patch_size_in_quads) - 2;
-    printf("%d\n", p.max_splits);
-    fflush(stdout);
+    p.max_lod = Log2(2.0*PI*radius/patch_size_in_quads) - 2;
 
     DrawItem &d = p.patch;
     d.shader = shader;
@@ -196,12 +211,14 @@ void InitCameraInfo(CameraInfo &info, float fovy_rad, float aspect_ratio,
     info.far_plane = far_plane;
 }
 
-void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int splits)
+void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
 {
-    if (splits == 0)
+    if (lod == 0)
     {
         // No more splitting
-        ListAdd(p.quads, q);
+        Quad Q = q;
+        Q.lod = lod;
+        ListAdd(p.quads, Q);
         return;
     }
 
@@ -231,7 +248,9 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int splits)
     if (ndc_area < 0.5*ndc_screen_area)
     {
         // No need to split
-        ListAdd(p.quads, q);
+        Quad Q = q;
+        Q.lod = lod;
+        ListAdd(p.quads, Q);
         return;
     }
 
@@ -247,10 +266,10 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int splits)
         q.p[2], VERT(2, 3), q.p[3],
     };
 
-    ProcessQuad(p, QUAD(0, 1, 3, 4), cam, splits - 1);
-    ProcessQuad(p, QUAD(1, 2, 4, 5), cam, splits - 1);
-    ProcessQuad(p, QUAD(3, 4, 6, 7), cam, splits - 1);
-    ProcessQuad(p, QUAD(4, 5, 7, 8), cam, splits - 1);
+    ProcessQuad(p, QUAD(0, 1, 3, 4), cam, lod - 1);
+    ProcessQuad(p, QUAD(1, 2, 4, 5), cam, lod - 1);
+    ProcessQuad(p, QUAD(3, 4, 6, 7), cam, lod - 1);
+    ProcessQuad(p, QUAD(4, 5, 7, 8), cam, lod - 1);
 
 #undef VERT
 #undef QUAD
@@ -275,14 +294,12 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
         VERT(-1,  1,  1), // 7
     };
 
-    int max_splits = p.max_splits;
-
-    ProcessQuad(p, QUAD(0, 1, 2, 3), cam, max_splits); // front
-    ProcessQuad(p, QUAD(1, 5, 6, 2), cam, max_splits); // right
-    ProcessQuad(p, QUAD(5, 4, 7, 6), cam, max_splits); // back
-    ProcessQuad(p, QUAD(4, 0, 3, 7), cam, max_splits); // left
-    ProcessQuad(p, QUAD(3, 2, 6, 7), cam, max_splits); // top
-    ProcessQuad(p, QUAD(4, 5, 1, 0), cam, max_splits); // bottom
+    ProcessQuad(p, QUAD(0, 1, 2, 3), cam, p.max_lod); // front
+    ProcessQuad(p, QUAD(1, 5, 6, 2), cam, p.max_lod); // right
+    ProcessQuad(p, QUAD(5, 4, 7, 6), cam, p.max_lod); // back
+    ProcessQuad(p, QUAD(4, 0, 3, 7), cam, p.max_lod); // left
+    ProcessQuad(p, QUAD(3, 2, 6, 7), cam, p.max_lod); // top
+    ProcessQuad(p, QUAD(4, 5, 1, 0), cam, p.max_lod); // bottom
 
 #undef VERT
 #undef QUAD
@@ -310,9 +327,37 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
     p.uniforms.proj.value.m4 = projection;
     p.uniforms.view.value.m4 = view;
 
+    Vec3 colors[] =
+    {
+        /*  0 */ V3(1.0f),
+        /*  1 */ V3(0.0f, 1.0f, 1.0f),
+        /*  2 */ V3(1.0f, 0.0f, 1.0f),
+        /*  3 */ V3(1.0f, 1.0f, 0.0f),
+        /*  4 */ V3(0.0f, 0.0f, 1.0f),
+        /*  5 */ V3(0.0f, 1.0f, 0.0f),
+        /*  6 */ V3(1.0f, 0.0f, 0.0f),
+
+        /*  7 */ V3(0.5f),
+        /*  8 */ V3(0.0f, 0.5f, 0.5f),
+        /*  9 */ V3(0.5f, 0.0f, 0.5f),
+        /* 10 */ V3(0.5f, 0.5f, 0.0f),
+        /* 11 */ V3(0.0f, 0.0f, 0.5f),
+        /* 12 */ V3(0.0f, 0.5f, 0.0f),
+        /* 13 */ V3(0.5f, 0.0f, 0.0f),
+
+        /* 14 */ V3(0.25f),
+        /* 15 */ V3(0.5f, 0.0f, 1.0f),
+        /* 16 */ V3(0.0f, 1.0f, 0.5f),
+        /* 17 */ V3(1.0f, 0.5f, 0.0f),
+        /* 18 */ V3(0.0f, 0.5f, 1.0f),
+        /* 19 */ V3(0.5f, 1.0f, 0.0f),
+        /* 20 */ V3(1.0f, 0.0f, 0.5f),
+    };
+
     for (int i = 0; i < p.quads.num; ++i)
     {
         Quad &q = p.quads.data[i];
+
         for (int j = 0; j < 4; ++j)
         {
             Vec3d e = q.p[j] - cam.position;
@@ -320,6 +365,8 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
             p.uniforms.p[j].value.v3 = V3(e.x, e.y, e.z);
             p.uniforms.n[j].value.v3 = V3(n.x, n.y, n.z);
         }
+
+        p.uniforms.color.value.v3 = colors[q.lod];
 
         Draw(p.patch);
     }
@@ -422,8 +469,10 @@ int main(int argc, char **argv)
         Vec3 angles;
     } cam = {};
 
-    cam.position.z = -radius * 1.2;
+    cam.position.z = -radius - 10.0;
 
+    double move_speed = 1000.0; // m/s
+    float look_speed = 2.0f; // rad/s
 
     // Start looping
     //
@@ -432,6 +481,7 @@ int main(int argc, char **argv)
 
     while (running)
     {
+
         // Handle events
         for (SDL_Event event; SDL_PollEvent(&event); )
         {
@@ -448,24 +498,44 @@ int main(int argc, char **argv)
                     running = false;
                     break;
                 }
+                switch (event.key.keysym.scancode)
+                {
+                    case SDL_SCANCODE_1: move_speed = 1.0e1; break;
+                    case SDL_SCANCODE_2: move_speed = 1.0e2; break;
+                    case SDL_SCANCODE_3: move_speed = 1.0e3; break;
+                    case SDL_SCANCODE_4: move_speed = 1.0e4; break;
+                    case SDL_SCANCODE_5: move_speed = 1.0e5; break;
+                    case SDL_SCANCODE_6: move_speed = 1.0e6; break;
+                    case SDL_SCANCODE_7: move_speed = 1.0e7; break;
+                    case SDL_SCANCODE_8: move_speed = 1.0e8; break;
+                    case SDL_SCANCODE_9: move_speed = 1.0e9; break;
+                    case SDL_SCANCODE_0: move_speed = 1.0e10; break;
+                    default: break;
+                }
             }
         }
 
         const Uint8 *keys = SDL_GetKeyboardState(nullptr);
 
         double dt;
+        int dt_ms;
         {
             Uint32 ticks = SDL_GetTicks();
             Uint32 delta = ticks - last_t;
             last_t = ticks;
             dt = delta / 1000.0;
+            dt_ms = delta;
         }
 
-        double move_speed = 3000.0; // m/s
-        float look_speed = 2.0f; // rad/s
+        {
+            int tri_count = planet.quads.num * 29*29*2;
 
-        if (keys[SDL_SCANCODE_LSHIFT])
-            move_speed *= 100.0;
+            char title[100];
+            snprintf(title, sizeof(title),
+                     "frametime: %d, fps: %d, tris: %d",
+                     dt_ms, (int)(1.0/dt), tri_count);
+            SDL_SetWindowTitle(window, title);
+        }
 
         Vec3d move = V3d(keys[SDL_SCANCODE_D] - keys[SDL_SCANCODE_A], 0,
                          keys[SDL_SCANCODE_W] - keys[SDL_SCANCODE_S]);
@@ -474,10 +544,22 @@ int main(int argc, char **argv)
 
         cam.angles += look * look_speed * dt;
 
+        Vec3 up = V3(Normalize(cam.position));
+        Vec3 right;
+        if (1.0f - Dot(up, V3(0.0f, 1.0f, 0.0f)) < 0.1f)
+            right = Normalize(Cross(up, V3(0.0f, 0.0f, 1.0f)));
+        else
+            right = Normalize(Cross(up, V3(0.0f, 1.0f, 0.0f)));
+        Vec3 forward = Normalize(Cross(right, up));
+
+        Mat3 base_rotation = Mat3FromBasisVectors(right, up, forward);
+
         // TODO: 6 degrees of freedom
         Mat3 rotation = (Mat3RotationY(cam.angles.y) *
                          Mat3RotationX(cam.angles.x) *
                          Mat3RotationZ(cam.angles.z));
+
+        rotation = base_rotation * rotation;
 
         cam.position += (V3d(rotation[0]) * move.x +
                          V3d(rotation[1]) * move.y +
@@ -485,8 +567,8 @@ int main(int argc, char **argv)
 
         float fovy = DegToRad(50.0f);
         float aspect = (float)window_w/window_h;
-        float near = 10.0f;
-        float far = 8000000.0f;
+        float near = 1.0f;
+        float far = 20000000.0f;
 
         CameraInfo cam_info;
         cam_info.position = cam.position;
