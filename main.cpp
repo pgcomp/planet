@@ -13,11 +13,115 @@ inline Vec3 Slerp(Vec3 a, Vec3 b, float t)
     return (Sin((1.0f - t)*theta)*a + Sin(t*theta)*b) / Sin(theta);
 }
 
+struct QuadID
+{
+    uint64_t value;
+};
+
+inline QuadID MakeID(uint64_t root, uint64_t depth, uint64_t index)
+{
+    assert(root - 1u < 6u);
+    assert(depth < (1u << 5u));
+    assert(index < (1ull << (64ull - 8ull)));
+    uint64_t id = (root << (64ull - 3ull)) | (depth << (64ull - 8ull)) | index;
+    return {id};
+}
+
+#define GET_BITS(value, first, count) (((value)>>(first)) & ((1ull<<(count))-1ull))
+
+inline uint64_t GetRoot(QuadID id)  { return GET_BITS(id.value, 64ull - 3ull, 3ull); }
+inline uint64_t GetDepth(QuadID id) { return GET_BITS(id.value, 64ull - 8ull, 5ull); }
+inline uint64_t GetIndex(QuadID id) { return GET_BITS(id.value, 0ull, 64ull - 8ull); }
+
 struct Quad
 {
     Vec3d p[4];
-    int lod;
+    QuadID id;
 };
+
+#define CACHE_MAX 256
+
+struct Map
+{
+    int count;
+    QuadID keys[CACHE_MAX];
+    GLuint values[CACHE_MAX];
+};
+
+GLuint MapFind(const Map &map, QuadID key)
+{
+    for (int i = 0; i < CACHE_MAX; i++)
+    {
+        if (map.keys[i].value == key.value)
+        {
+            return map.values[i];
+        }
+    }
+    return 0;
+}
+
+void MapPut(Map &map, QuadID key, GLuint value)
+{
+    if (map.count < CACHE_MAX)
+    {
+        int index = map.count++;
+        map.keys[index] = key;
+        map.values[index] = value;
+    }
+}
+
+struct HeightMapCache
+{
+    Map map;
+};
+
+#define STB_PERLIN_IMPLEMENTATION
+#include "stb_perlin.h"
+
+GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q)
+{
+    GLuint height_map = MapFind(cache.map, q.id);
+    if (height_map != 0)
+    {
+        return height_map;
+    }
+
+    if (cache.map.count == CACHE_MAX)
+    {
+        return 0;
+    }
+
+    float data[32][32];
+
+    double scale = 0.0005;
+    Vec3 p0 = V3(q.p[0] * scale);
+    Vec3 p1 = V3(q.p[1] * scale);
+    Vec3 p2 = V3(q.p[2] * scale);
+    Vec3 p3 = V3(q.p[3] * scale);
+
+    Vec3 v0 = p1 - p0;
+    Vec3 v1 = p3 - p2;
+
+    for (int y = 0; y < 32; y++)
+    {
+        float v = (y - 1) / 30.0f;
+        for (int x = 0; x < 32; x++)
+        {
+            float u = (x - 1) / 30.0f;
+            Vec3 q0 = p0 + v0 * u;
+            Vec3 q1 = p2 + v1 * u;
+            Vec3 v2 = q1 - q0;
+            Vec3 p = q0 + v2 * v;
+
+            data[y][x] = 500.0f *
+                stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.5f, 6, 0, 0, 0);
+        }
+    }
+
+    height_map = CreateTexture2D(32, 32, GL_RED, GL_FLOAT, data);
+    MapPut(cache.map, q.id, height_map);
+    return height_map;
+}
 
 struct Planet
 {
@@ -29,11 +133,13 @@ struct Planet
     {
         Uniform proj;
         Uniform view;
-        Uniform p[4];
-        Uniform n[4];
+        Uniform p;
+        Uniform n;
         Uniform color;
+        TexUniforms hmap;
     } uniforms;
     List<Quad> quads;
+    HeightMapCache cache;
 };
 
 bool InitPlanet(Planet &p, double radius)
@@ -47,6 +153,8 @@ bool InitPlanet(Planet &p, double radius)
              uniform mat4 View;
              uniform vec3 P[4];
              uniform vec3 N[4];
+
+             out vec3 Normal;
 
              struct V { vec3 p; vec3 n; };
 
@@ -84,6 +192,20 @@ bool InitPlanet(Planet &p, double radius)
              return result;
              }
 
+             float sample_height(vec2 uv) {
+             return texture(HeightMap, uv).r;
+             }
+
+             vec3 compute_normal(vec2 uv) {
+             vec3 offs = vec3(HeightMap_pixel_size.x, 0.0,
+                              HeightMap_pixel_size.y);
+             float x0 = sample_height(uv - offs.xy);
+             float x1 = sample_height(uv + offs.xy);
+             float y0 = sample_height(uv - offs.yz);
+             float y1 = sample_height(uv + offs.yz);
+             return normalize(vec3(x0 - x1, 2.0, y0 - y1));
+             }
+
              void main() {
              V a; a.p = P[0]; a.n = N[0];
              V b; b.p = P[1]; b.n = N[1];
@@ -92,14 +214,25 @@ bool InitPlanet(Planet &p, double radius)
              V p = interpolate(a, b, UV.x);
              V q = interpolate(c, d, UV.x);
              V v = interpolate(p, q, UV.y);
-             float h = texture(HeightMap, UV).r * 10.0;
-             v.p += h*v.n;
-             gl_Position = Projection * View * vec4(v.p, 1.0);
+             vec2 uv = mix(HeightMap_corners[0], HeightMap_corners[1], UV);
+             float height = sample_height(uv);
+             vec3 normal = compute_normal(uv);
+             vec3 n = v.n;
+             vec3 t = normalize(cross(n, q.p - p.p));
+             vec3 bi = normalize(cross(t, n));
+             Normal = normalize(mat3(t, n, bi) * normal);
+             gl_Position = Projection * View * vec4(v.p + n*height, 1.0);
              },
 
              uniform vec3 Color;
+             in vec3 Normal;
+
              void main() {
-             gl_FragColor = vec4(Color, 1.0);
+             vec3 n = normalize(Normal);
+             float light = 0.001 + max(0.0, dot(n, vec3(0.0, 0.0, -1.0)));
+             gl_FragColor = vec4(vec3(sqrt(light)), 1.0);
+             //gl_FragColor = vec4(n * 0.5 + vec3(0.5), 1.0);
+             //gl_FragColor = vec4(Color, 1.0);
              });
 
     GLuint shader = CreateShaderFromSource(shader_source);
@@ -180,16 +313,16 @@ bool InitPlanet(Planet &p, double radius)
     p.hmap.texture = height_map;
     p.hmap.bind_index = 0;
 
-    InitUniform(p.uniforms.proj, shader, "Projection", Mat4Identity());
-    InitUniform(p.uniforms.view, shader, "View", Mat4Identity());
-    for (int i = 0; i < 4; ++i)
-    {
-        char P[] = "P[_]"; P[2] = '0' + i;
-        char N[] = "N[_]"; N[2] = '0' + i;
-        InitUniform(p.uniforms.p[i], shader, P, V3(0.0f));
-        InitUniform(p.uniforms.n[i], shader, N, V3(0.0f));
-    };
-    InitUniform(p.uniforms.color, shader, "Color", V3(0.0f));
+    InitTexUniforms(p.uniforms.hmap, shader, "HeightMap");
+    p.uniforms.hmap.corners.value.v2[0] = V2(1.5f / tex_size);
+    p.uniforms.hmap.corners.value.v2[1] = V2((tex_size - 1.5f) / tex_size);
+    p.uniforms.hmap.pixel_size.value.v2[0] = V2(1.0f / tex_size);
+
+    InitUniform(p.uniforms.proj, shader, "Projection", Uniform::MAT4);
+    InitUniform(p.uniforms.view, shader, "View", Uniform::MAT4);
+    InitUniform(p.uniforms.p, shader, "P", Uniform::VEC3, 4);
+    InitUniform(p.uniforms.n, shader, "N", Uniform::VEC3, 4);
+    InitUniform(p.uniforms.color, shader, "Color", Uniform::VEC3);
 
     p.radius = radius;
 
@@ -236,9 +369,7 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
     if (lod == 0)
     {
         // No more splitting
-        Quad Q = q;
-        Q.lod = lod;
-        ListAdd(p.quads, Q);
+        ListAdd(p.quads, q);
         return;
     }
 
@@ -268,16 +399,15 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
     if (ndc_area < 0.5*ndc_screen_area)
     {
         // No need to split
-        Quad Q = q;
-        Q.lod = lod;
-        ListAdd(p.quads, Q);
+        ListAdd(p.quads, q);
         return;
     }
 
     // Do split
 
 #define VERT(i, j) Normalize(q.p[i] + q.p[j]) * p.radius
-#define QUAD(a, b, c, d) (Quad){verts[a], verts[b], verts[c], verts[d]}
+#define QUAD(a, b, c, d, id) \
+    (Quad){verts[a], verts[b], verts[c], verts[d], id}
 
     Vec3d verts[] =
     {
@@ -286,10 +416,17 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
         q.p[2], VERT(2, 3), q.p[3],
     };
 
-    ProcessQuad(p, QUAD(0, 1, 3, 4), cam, lod - 1);
-    ProcessQuad(p, QUAD(1, 2, 4, 5), cam, lod - 1);
-    ProcessQuad(p, QUAD(3, 4, 6, 7), cam, lod - 1);
-    ProcessQuad(p, QUAD(4, 5, 7, 8), cam, lod - 1);
+    uint64_t root = GetRoot(q.id);
+    uint64_t depth = GetDepth(q.id);
+    uint64_t index0 = GetIndex(q.id);
+    uint64_t index1 = index0 | (1ull << (2ull*depth));
+    uint64_t index2 = index0 | (2ull << (2ull*depth));
+    uint64_t index3 = index0 | (3ull << (2ull*depth));
+
+    ProcessQuad(p, QUAD(0, 1, 3, 4, MakeID(root, depth + 1, index0)), cam, lod - 1);
+    ProcessQuad(p, QUAD(1, 2, 4, 5, MakeID(root, depth + 1, index1)), cam, lod - 1);
+    ProcessQuad(p, QUAD(3, 4, 6, 7, MakeID(root, depth + 1, index2)), cam, lod - 1);
+    ProcessQuad(p, QUAD(4, 5, 7, 8, MakeID(root, depth + 1, index3)), cam, lod - 1);
 
 #undef VERT
 #undef QUAD
@@ -300,7 +437,8 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
     ListResize(p.quads, 0);
 
 #define VERT(x, y, z) Normalize(V3d(x, y, z)) * p.radius
-#define QUAD(a, b, c, d) (Quad){verts[a], verts[b], verts[d], verts[c]}
+#define QUAD(a, b, c, d, root) \
+    (Quad){verts[a], verts[b], verts[d], verts[c], MakeID(root, 0, 0)}
 
     Vec3d verts[] =
     {
@@ -314,12 +452,12 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
         VERT(-1,  1,  1), // 7
     };
 
-    ProcessQuad(p, QUAD(0, 1, 2, 3), cam, p.max_lod); // front
-    ProcessQuad(p, QUAD(1, 5, 6, 2), cam, p.max_lod); // right
-    ProcessQuad(p, QUAD(5, 4, 7, 6), cam, p.max_lod); // back
-    ProcessQuad(p, QUAD(4, 0, 3, 7), cam, p.max_lod); // left
-    ProcessQuad(p, QUAD(3, 2, 6, 7), cam, p.max_lod); // top
-    ProcessQuad(p, QUAD(4, 5, 1, 0), cam, p.max_lod); // bottom
+    ProcessQuad(p, QUAD(0, 1, 2, 3, 1), cam, p.max_lod); // front
+    ProcessQuad(p, QUAD(1, 5, 6, 2, 2), cam, p.max_lod); // right
+    ProcessQuad(p, QUAD(5, 4, 7, 6, 3), cam, p.max_lod); // back
+    ProcessQuad(p, QUAD(4, 0, 3, 7, 4), cam, p.max_lod); // left
+    ProcessQuad(p, QUAD(3, 2, 6, 7, 5), cam, p.max_lod); // top
+    ProcessQuad(p, QUAD(4, 5, 1, 0, 6), cam, p.max_lod); // bottom
 
 #undef VERT
 #undef QUAD
@@ -347,6 +485,7 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
     p.uniforms.proj.value.m4 = projection;
     p.uniforms.view.value.m4 = view;
 
+#if 0
     Vec3 colors[] =
     {
         /*  0 */ V3(1.0f),
@@ -373,20 +512,23 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
         /* 19 */ V3(0.5f, 1.0f, 0.0f),
         /* 20 */ V3(1.0f, 0.0f, 0.5f),
     };
+#endif
 
     for (int i = 0; i < p.quads.num; ++i)
     {
         Quad &q = p.quads.data[i];
 
+        p.hmap.texture = GetHeightMapForQuad(p.cache, q);
+
         for (int j = 0; j < 4; ++j)
         {
             Vec3d e = q.p[j] - cam.position;
             Vec3d n = Normalize(q.p[j]);
-            p.uniforms.p[j].value.v3 = V3(e.x, e.y, e.z);
-            p.uniforms.n[j].value.v3 = V3(n.x, n.y, n.z);
+            p.uniforms.p.value.v3[j] = V3(e.x, e.y, e.z);
+            p.uniforms.n.value.v3[j] = V3(n.x, n.y, n.z);
         }
 
-        p.uniforms.color.value.v3 = colors[q.lod];
+        //p.uniforms.color.value.v3[0] = colors[q.lod];
 
         Draw(p.patch);
     }
@@ -473,7 +615,7 @@ int main(int argc, char **argv)
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 
-    glPolygonMode(GL_FRONT, GL_LINE);
+    //glPolygonMode(GL_FRONT, GL_LINE);
 
     double radius = 6371000.0;
 

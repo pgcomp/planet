@@ -35,6 +35,8 @@ inline Vec2 V2(float x, float y)
     return result;
 }
 
+inline Vec2 V2(float s) { return V2(s, s); }
+
 // Vec3 and Vec3d
 
 #include "vec3.h"

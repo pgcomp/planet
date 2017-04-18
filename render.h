@@ -34,18 +34,29 @@ struct Uniform
 {
     enum Type
     {
-        FLOAT, VEC3, MAT4
+        FLOAT = 1,
+        VEC2  = 2,
+        VEC3  = 3,
+        MAT4  = 16
     };
 
     GLint loc;
     Type type;
+    int count;
     union
     {
-        float f;
-        Vec3  v3;
+        float f[16];
+        Vec2  v2[8];
+        Vec3  v3[5];
+        //Vec4  v4[4];
         Mat4  m4;
-        float data[1];
     } value;
+};
+
+struct TexUniforms
+{
+    Uniform corners;
+    Uniform pixel_size;
 };
 
 struct DrawItem
@@ -82,9 +93,9 @@ inline int GetUniformCountFromSize(unsigned int size)
     return size / sizeof(Uniform);
 }
 
-void InitUniform(Uniform &u, GLuint shader, const char *name, float value);
-void InitUniform(Uniform &u, GLuint shader, const char *name, Vec3 value);
-void InitUniform(Uniform &u, GLuint shader, const char *name, const Mat4 &value);
+void InitUniform(Uniform &u, GLuint shader, const char *name,
+                 Uniform::Type type, int count = 1);
+void InitTexUniforms(TexUniforms &us, GLuint shader, const char *sampler_name);
 
 // Textures
 

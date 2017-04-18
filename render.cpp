@@ -89,7 +89,10 @@ GLuint CompileShader(GLenum type, const char *source)
         source_list[1] =
             "#define VERTEX_SHADER\n"
             "#define ATTRIBUTE(type, name, index) in type name\n"
-            "#define SAMPLER(type, name, index) uniform type name\n";
+            "#define SAMPLER(type, name, index) \\\n"
+            "uniform type name; \\\n"
+            "uniform vec2 name##_corners[2]; \\\n"
+            "uniform vec2 name##_pixel_size\n";
     }
 
     GLuint shader = glCreateShader(type);
@@ -358,11 +361,15 @@ GLuint CreateShaderFromSource(const char *source)
     return 0;
 }
 
-inline void InitUniformCommon(Uniform &u, GLuint shader, const char *name,
-                              Uniform::Type type)
+void InitUniform(Uniform &u, GLuint shader, const char *name,
+                 Uniform::Type type, int count)
 {
+    assert(count > 0);
+    assert((int)type * count <= 16);
+
     u.loc = glGetUniformLocation(shader, name);
     u.type = type;
+    u.count = count;
 
     if (u.loc < 0)
     {
@@ -370,22 +377,24 @@ inline void InitUniformCommon(Uniform &u, GLuint shader, const char *name,
     }
 }
 
-void InitUniform(Uniform &u, GLuint shader, const char *name, float value)
+void InitTexUniforms(TexUniforms &us, GLuint shader, const char *sampler_name)
 {
-    InitUniformCommon(u, shader, name, Uniform::FLOAT);
-    u.value.f = value;
-}
+    char buf[128];
+#define TEX_UNIFORM(Name, Type, Count) { \
+        int len = snprintf(buf, sizeof(buf), "%s_%s", sampler_name, #Name); \
+        if (len < (int)sizeof(buf)) { \
+            us.Name.loc = glGetUniformLocation(shader, buf); \
+            us.Name.type = Uniform::Type; \
+            us.Name.count = Count; } \
+        else LOG_WARNING("Uniform name too long: %s_%s.", sampler_name, #Name); }
 
-void InitUniform(Uniform &u, GLuint shader, const char *name, Vec3 value)
-{
-    InitUniformCommon(u, shader, name, Uniform::VEC3);
-    u.value.v3 = value;
-}
+    TEX_UNIFORM(corners, VEC2, 2);
+    TEX_UNIFORM(pixel_size, VEC2, 1);
 
-void InitUniform(Uniform &u, GLuint shader, const char *name, const Mat4 &value)
-{
-    InitUniformCommon(u, shader, name, Uniform::MAT4);
-    u.value.m4 = value;
+    us.corners.value.v2[0] = V2(0.0f);
+    us.corners.value.v2[1] = V2(1.0f);
+
+#undef TEX_UNIFORM
 }
 
 // Textures
@@ -396,7 +405,12 @@ GLuint CreateTexture2D(unsigned int w, unsigned int h, GLenum fmt,
     GLuint texture;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, fmt, w, h, 0, fmt, type, data);
+
+    GLint internal_fmt = fmt;
+    if (type == GL_FLOAT && fmt == GL_RED)
+        internal_fmt = GL_R32F;
+
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_fmt, w, h, 0, fmt, type, data);
     // GL_NEAREST, GL_LINEAR, GL_NEAREST_MIPMAP_NEAREST
     // GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -434,12 +448,14 @@ void Draw(DrawItem &d)
     for (int i = 0; i < d.uniform_count; i++)
     {
         Uniform &u = d.uniforms[i];
+        if (u.loc < 0) continue;
         switch (u.type)
         {
-            case Uniform::FLOAT: glUniform1fv(u.loc, 1, u.value.data); break;
-            case Uniform::VEC3:  glUniform3fv(u.loc, 1, u.value.data); break;
+            case Uniform::FLOAT: glUniform1fv(u.loc, u.count, u.value.f); break;
+            case Uniform::VEC2:  glUniform2fv(u.loc, u.count, u.value.f); break;
+            case Uniform::VEC3:  glUniform3fv(u.loc, u.count, u.value.f); break;
             case Uniform::MAT4:
-            glUniformMatrix4fv(u.loc, 1, GL_FALSE, u.value.data); break;
+            glUniformMatrix4fv(u.loc, u.count, GL_FALSE, u.value.f); break;
             default: assert(0 && "Invalid uniform type!");
         }
     }
