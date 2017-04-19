@@ -219,14 +219,14 @@ bool InitPlanet(Planet &p, double radius)
              return texture(HeightMap, uv).r;
              }
 
-             vec3 compute_normal(vec2 uv) {
+             vec3 compute_normal(vec2 uv, float xyscale) {
              vec3 offs = vec3(HeightMap_pixel_size.x, 0.0,
                               HeightMap_pixel_size.y);
              float x0 = sample_height(uv - offs.xy);
              float x1 = sample_height(uv + offs.xy);
              float y0 = sample_height(uv - offs.yz);
              float y1 = sample_height(uv + offs.yz);
-             return normalize(vec3(x0 - x1, 2.0, y0 - y1));
+             return normalize(vec3(x0 - x1, 2.0*xyscale, y0 - y1));
              }
 
              void main() {
@@ -239,7 +239,7 @@ bool InitPlanet(Planet &p, double radius)
              V v = interpolate(p, q, UV.y);
              vec2 uv = mix(HeightMap_corners[0], HeightMap_corners[1], UV);
              float height = sample_height(uv);
-             vec3 normal = compute_normal(uv);
+             vec3 normal = compute_normal(uv, length(q.p - p.p) / 29.0);
              vec3 n = v.n;
              vec3 t = normalize(cross(n, q.p - p.p));
              vec3 bi = normalize(cross(t, n));
