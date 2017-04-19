@@ -645,7 +645,7 @@ int main(int argc, char **argv)
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 
-    //glPolygonMode(GL_FRONT, GL_LINE);
+    bool wire_frame = false;
 
     double radius = 6371000.0;
 
@@ -700,8 +700,14 @@ int main(int argc, char **argv)
                     case SDL_SCANCODE_6: move_speed = 1.0e6; break;
                     case SDL_SCANCODE_7: move_speed = 1.0e7; break;
                     case SDL_SCANCODE_8: move_speed = 1.0e8; break;
-                    case SDL_SCANCODE_9: move_speed = 1.0e9; break;
-                    case SDL_SCANCODE_0: move_speed = 1.0e10; break;
+                    //case SDL_SCANCODE_9: move_speed = 1.0e9; break;
+                    //case SDL_SCANCODE_0: move_speed = 1.0e10; break;
+                    case SDL_SCANCODE_P:
+                    {
+                        wire_frame = !wire_frame;
+                        glPolygonMode(GL_FRONT, wire_frame ? GL_LINE : GL_FILL);
+                        break;
+                    }
                     default: break;
                 }
             }
