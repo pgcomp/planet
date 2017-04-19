@@ -6,12 +6,8 @@
 
 #define ArrayCount(arr) (sizeof(arr)/sizeof(*arr))
 
-// Not used anywhere
-inline Vec3 Slerp(Vec3 a, Vec3 b, float t)
-{
-    float theta = ACos(Dot(a, b) / (Length(a)*Length(b)));
-    return (Sin((1.0f - t)*theta)*a + Sin(t*theta)*b) / Sin(theta);
-}
+
+#define U64(x) ((uint64_t)(x))
 
 struct QuadID
 {
@@ -20,18 +16,23 @@ struct QuadID
 
 inline QuadID MakeID(uint64_t root, uint64_t depth, uint64_t index)
 {
-    assert(root - 1u < 6u);
-    assert(depth < (1u << 5u));
-    assert(index < (1ull << (64ull - 8ull)));
-    uint64_t id = (root << (64ull - 3ull)) | (depth << (64ull - 8ull)) | index;
+    assert(root < U64(6));
+    assert(depth < U64(32));
+    assert(index < (U64(1) << U64(64 - 9)));
+    // only valid ids have highest bit set -> zero id is invalid, yay!
+    uint64_t highest_bit = U64(1) << U64(64 - 1);
+    uint64_t id = (highest_bit | (root << U64(64 - 4)) | (depth << U64(64 - 9)) | index);
     return {id};
 }
 
-#define GET_BITS(value, first, count) (((value)>>(first)) & ((1ull<<(count))-1ull))
+#define GET_BITS(value, first, count) (((value)>>U64(first)) & ((U64(1)<<U64(count))-U64(1)))
 
-inline uint64_t GetRoot(QuadID id)  { return GET_BITS(id.value, 64ull - 3ull, 3ull); }
-inline uint64_t GetDepth(QuadID id) { return GET_BITS(id.value, 64ull - 8ull, 5ull); }
-inline uint64_t GetIndex(QuadID id) { return GET_BITS(id.value, 0ull, 64ull - 8ull); }
+inline uint64_t GetRoot(QuadID id)  { return GET_BITS(id.value, 64 - 4, 3); }
+inline uint64_t GetDepth(QuadID id) { return GET_BITS(id.value, 64 - 9, 5); }
+inline uint64_t GetIndex(QuadID id) { return GET_BITS(id.value, 0, 64 - 9); }
+
+#undef GET_BITS
+
 
 struct Quad
 {
@@ -39,88 +40,111 @@ struct Quad
     QuadID id;
 };
 
-#define CACHE_MAX 256
 
-struct Map
-{
-    int count;
-    QuadID keys[CACHE_MAX];
-    GLuint values[CACHE_MAX];
-};
-
-GLuint MapFind(const Map &map, QuadID key)
-{
-    for (int i = 0; i < CACHE_MAX; i++)
-    {
-        if (map.keys[i].value == key.value)
-        {
-            return map.values[i];
-        }
-    }
-    return 0;
-}
-
-void MapPut(Map &map, QuadID key, GLuint value)
-{
-    if (map.count < CACHE_MAX)
-    {
-        int index = map.count++;
-        map.keys[index] = key;
-        map.values[index] = value;
-    }
-}
+#define CACHE_MAX 512
+#define MAP_MAX 661 // prime
 
 struct HeightMapCache
 {
-    Map map;
+    int count;
+    QuadID quad_ids[MAP_MAX];
+    GLuint height_maps[MAP_MAX];
+    uint32_t last_tick_used[MAP_MAX];
 };
+
+// TODO: Remove
+static int fast_count = 0;
+
+int MapFind(const HeightMapCache &cache, QuadID key, QuadID find)
+{
+    assert(key.value != U64(0));
+
+    for (int i = 0; i < MAP_MAX; i++)
+    {
+        uint32_t hash = uint32_t(key.value) ^ uint32_t(key.value >> 32);
+        int index = (hash + i) % MAP_MAX;
+        if (cache.quad_ids[index].value == find.value)
+        {
+            if (key.value == find.value && i < 10)
+                fast_count++;
+            return index;
+        }
+    }
+
+    return -1;
+}
+
+#undef U64
 
 #define STB_PERLIN_IMPLEMENTATION
 #include "stb_perlin.h"
 
-GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q)
+GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q, int tick)
 {
-    GLuint height_map = MapFind(cache.map, q.id);
-    if (height_map != 0)
+    int index = MapFind(cache, q.id, q.id);
+
+    if (index < 0)
     {
-        return height_map;
-    }
+        float data[32][32];
 
-    if (cache.map.count == CACHE_MAX)
-    {
-        return 0;
-    }
+        double scale = 0.0005;
+        Vec3 p0 = V3(q.p[0] * scale);
+        Vec3 p1 = V3(q.p[1] * scale);
+        Vec3 p2 = V3(q.p[2] * scale);
+        Vec3 p3 = V3(q.p[3] * scale);
 
-    float data[32][32];
+        Vec3 v0 = p1 - p0;
+        Vec3 v1 = p3 - p2;
 
-    double scale = 0.0005;
-    Vec3 p0 = V3(q.p[0] * scale);
-    Vec3 p1 = V3(q.p[1] * scale);
-    Vec3 p2 = V3(q.p[2] * scale);
-    Vec3 p3 = V3(q.p[3] * scale);
-
-    Vec3 v0 = p1 - p0;
-    Vec3 v1 = p3 - p2;
-
-    for (int y = 0; y < 32; y++)
-    {
-        float v = (y - 1) / 30.0f;
-        for (int x = 0; x < 32; x++)
+        for (int y = 0; y < 32; y++)
         {
-            float u = (x - 1) / 30.0f;
-            Vec3 q0 = p0 + v0 * u;
-            Vec3 q1 = p2 + v1 * u;
-            Vec3 v2 = q1 - q0;
-            Vec3 p = q0 + v2 * v;
+            float v = (y - 1) / 30.0f;
+            for (int x = 0; x < 32; x++)
+            {
+                float u = (x - 1) / 30.0f;
+                Vec3 q0 = p0 + v0 * u;
+                Vec3 q1 = p2 + v1 * u;
+                Vec3 v2 = q1 - q0;
+                Vec3 p = q0 + v2 * v;
 
-            data[y][x] = 500.0f *
-                stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.5f, 6, 0, 0, 0);
+                data[y][x] = 500.0f *
+                    stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.5f, 6, 0, 0, 0);
+            }
         }
+
+        GLuint height_map = CreateTexture2D(32, 32, GL_RED, GL_FLOAT, data);
+
+        if (cache.count == CACHE_MAX)
+        {
+            int lru;
+            uint32_t delta_ticks = 0;
+
+            for (int i = 0; i < MAP_MAX; i++)
+            {
+                uint32_t t = cache.last_tick_used[i];
+                uint32_t delta = tick - t;
+                if (t != 0 && delta > delta_ticks)
+                {
+                    lru = i;
+                    delta_ticks = delta;
+                }
+            }
+
+            DeleteTexture(cache.height_maps[lru]);
+            cache.quad_ids[lru] = QuadID{0};
+            cache.last_tick_used[lru] = 0;
+            cache.count--;
+        }
+
+        index = MapFind(cache, q.id, QuadID{0});
+        cache.quad_ids[index] = q.id;
+        cache.height_maps[index] = height_map;
+        cache.count++;
     }
 
-    height_map = CreateTexture2D(32, 32, GL_RED, GL_FLOAT, data);
-    MapPut(cache.map, q.id, height_map);
-    return height_map;
+    if (tick == 0) tick = 1; // zero means not in use
+    cache.last_tick_used[index] = tick;
+    return cache.height_maps[index];
 }
 
 struct Planet
@@ -135,7 +159,6 @@ struct Planet
         Uniform view;
         Uniform p;
         Uniform n;
-        Uniform color;
         TexUniforms hmap;
     } uniforms;
     List<Quad> quads;
@@ -232,7 +255,6 @@ bool InitPlanet(Planet &p, double radius)
              float light = 0.001 + max(0.0, dot(n, vec3(0.0, 0.0, -1.0)));
              gl_FragColor = vec4(vec3(sqrt(light)), 1.0);
              //gl_FragColor = vec4(n * 0.5 + vec3(0.5), 1.0);
-             //gl_FragColor = vec4(Color, 1.0);
              });
 
     GLuint shader = CreateShaderFromSource(shader_source);
@@ -322,7 +344,6 @@ bool InitPlanet(Planet &p, double radius)
     InitUniform(p.uniforms.view, shader, "View", Uniform::MAT4);
     InitUniform(p.uniforms.p, shader, "P", Uniform::VEC3, 4);
     InitUniform(p.uniforms.n, shader, "N", Uniform::VEC3, 4);
-    InitUniform(p.uniforms.color, shader, "Color", Uniform::VEC3);
 
     p.radius = radius;
 
@@ -452,12 +473,12 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
         VERT(-1,  1,  1), // 7
     };
 
-    ProcessQuad(p, QUAD(0, 1, 2, 3, 1), cam, p.max_lod); // front
-    ProcessQuad(p, QUAD(1, 5, 6, 2, 2), cam, p.max_lod); // right
-    ProcessQuad(p, QUAD(5, 4, 7, 6, 3), cam, p.max_lod); // back
-    ProcessQuad(p, QUAD(4, 0, 3, 7, 4), cam, p.max_lod); // left
-    ProcessQuad(p, QUAD(3, 2, 6, 7, 5), cam, p.max_lod); // top
-    ProcessQuad(p, QUAD(4, 5, 1, 0, 6), cam, p.max_lod); // bottom
+    ProcessQuad(p, QUAD(0, 1, 2, 3, 0), cam, p.max_lod); // front
+    ProcessQuad(p, QUAD(1, 5, 6, 2, 1), cam, p.max_lod); // right
+    ProcessQuad(p, QUAD(5, 4, 7, 6, 2), cam, p.max_lod); // back
+    ProcessQuad(p, QUAD(4, 0, 3, 7, 3), cam, p.max_lod); // left
+    ProcessQuad(p, QUAD(3, 2, 6, 7, 4), cam, p.max_lod); // top
+    ProcessQuad(p, QUAD(4, 5, 1, 0, 5), cam, p.max_lod); // bottom
 
 #undef VERT
 #undef QUAD
@@ -514,11 +535,15 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
     };
 #endif
 
+    // TODO: Fix
+    static uint32_t tick = 0;
+    tick++;
+
     for (int i = 0; i < p.quads.num; ++i)
     {
         Quad &q = p.quads.data[i];
 
-        p.hmap.texture = GetHeightMapForQuad(p.cache, q);
+        p.hmap.texture = GetHeightMapForQuad(p.cache, q, tick);
 
         for (int j = 0; j < 4; ++j)
         {
@@ -528,10 +553,15 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
             p.uniforms.n.value.v3[j] = V3(n.x, n.y, n.z);
         }
 
-        //p.uniforms.color.value.v3[0] = colors[q.lod];
-
         Draw(p.patch);
     }
+
+    if ((float)fast_count/p.quads.num < 0.8f)
+    {
+        LOG_WARNING("Map slowness detected: Only %d/%d fetches were fast.",
+                    fast_count, p.quads.num);
+    }
+    fast_count = 0;
 }
 
 

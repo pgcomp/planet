@@ -421,6 +421,12 @@ GLuint CreateTexture2D(unsigned int w, unsigned int h, GLenum fmt,
     return texture;
 }
 
+void DeleteTexture(GLuint texture)
+{
+    glDeleteTextures(1, &texture);
+}
+
+
 // Draw
 
 inline int GetIndexTypeSize(GLenum type)

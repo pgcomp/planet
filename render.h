@@ -101,6 +101,7 @@ void InitTexUniforms(TexUniforms &us, GLuint shader, const char *sampler_name);
 
 GLuint CreateTexture2D(unsigned int w, unsigned int h, GLenum fmt,
                        GLenum type, const void *data);
+void DeleteTexture(GLuint texture);
 
 // Draw
 

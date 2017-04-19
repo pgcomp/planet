@@ -65,5 +65,11 @@ inline vec3_t Cross(vec3_t a, vec3_t b)
     return result;
 }
 
+inline vec3_t Slerp(vec3_t a, vec3_t b, real_t t)
+{
+    float theta = ACos(Dot(a, b) / (Length(a)*Length(b)));
+    return (Sin((real_t(1.0) - t)*theta)*a + Sin(t*theta)*b) / Sin(theta);
+}
+
 #undef vec3_t
 #undef real_t
