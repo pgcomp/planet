@@ -168,7 +168,7 @@ struct Planet
 bool InitPlanet(Planet &p, double radius)
 {
     const char *shader_source =
-        GLSL(ATTRIBUTE(vec2, UV, 0);
+        GLSL(ATTRIBUTE(vec3, UV, 0);
 
              SAMPLER(sampler2D, HeightMap, 0);
 
@@ -237,14 +237,15 @@ bool InitPlanet(Planet &p, double radius)
              V p = interpolate(a, b, UV.x);
              V q = interpolate(c, d, UV.x);
              V v = interpolate(p, q, UV.y);
-             vec2 uv = mix(HeightMap_corners[0], HeightMap_corners[1], UV);
+             vec2 uv = mix(HeightMap_corners[0], HeightMap_corners[1], UV.xy);
              float height = sample_height(uv);
              vec3 normal = compute_normal(uv, length(q.p - p.p) / 29.0);
              vec3 n = v.n;
              vec3 t = normalize(cross(n, q.p - p.p));
              vec3 bi = normalize(cross(t, n));
              Normal = normalize(mat3(t, n, bi) * normal);
-             gl_Position = Projection * View * vec4(v.p + n*height, 1.0);
+             float h = height - 1000.0*UV.z;
+             gl_Position = Projection * View * vec4(v.p + n*h, 1.0);
              },
 
              uniform vec3 Color;
@@ -263,44 +264,64 @@ bool InitPlanet(Planet &p, double radius)
         return false;
     }
 
-
-    struct Vert
-    {
-        Vec2 uv;
-    };
-
     const int patch_size_in_verts = 30; // configurable
     const int patch_size_in_quads = patch_size_in_verts - 1;
-    const int verts_total = Square(patch_size_in_verts);
+    const int skirt_verts = 4*patch_size_in_verts;
+    const int verts_total = Square(patch_size_in_verts) + skirt_verts;
     const int indices_per_reset = 2;
     const int indices_per_strip =
         2 + patch_size_in_quads*2 + indices_per_reset;
+    const int skirt_indices = patch_size_in_quads*4 + 2*indices_per_strip;
     const int indices_total =
-        patch_size_in_quads*indices_per_strip - indices_per_reset;
+        patch_size_in_quads*indices_per_strip - indices_per_reset + skirt_indices;
 
-    Vert verts[verts_total];
+    Vec3 verts[verts_total];
     {
         int n = 0;
+
+        double div = 1.0 / patch_size_in_quads;
+
+        for (int x = 0; x < patch_size_in_verts; ++x)
+            verts[n++] = V3(x*div, 0.0f, 1.0f); // skirt
+
         for (int y = 0; y < patch_size_in_verts; ++y)
         {
+            verts[n++] = V3(0.0f, y*div, 1.0f); // skirt
+
             for (int x = 0; x < patch_size_in_verts; ++x)
-            {
-                Vert &v = verts[n++];
-                v.uv.x = (double)x / patch_size_in_quads;
-                v.uv.y = (double)y / patch_size_in_quads;
-            }
+                verts[n++] = V3(x*div, y*div, 0.0f);
+
+            verts[n++] = V3(1.0f, y*div, 1.0f); // skirt
         }
+
+        for (int x = 0; x < patch_size_in_verts; ++x)
+            verts[n++] = V3(x*div, 1.0f, 1.0f); // skirt
+
         assert(n == verts_total);
     }
 
-    unsigned int indices[indices_total];
+    uint32_t indices[indices_total];
     {
         int n = 0;
-        unsigned int v0 = patch_size_in_verts;
-        unsigned int v1 = 0;
+
+        uint32_t v0 = 0;
+        uint32_t v1 = patch_size_in_verts + 1;
+
+        // skirt
+        for (int x = 0; x < patch_size_in_verts; ++x)
+        {
+            indices[n++] = v0++;
+            indices[n++] = v1++;
+        }
+
+        // reset
+        indices[n++] = v1-1;
+        indices[n++] = v0;
+        v1++;
+
         for (int y = 0; y < patch_size_in_quads; ++y)
         {
-            for (int x = 0; x < patch_size_in_verts; ++x)
+            for (int x = 0; x < patch_size_in_verts + 2; ++x)
             {
                 indices[n++] = v0++;
                 indices[n++] = v1++;
@@ -312,30 +333,35 @@ bool InitPlanet(Planet &p, double radius)
                 indices[n++] = v0;
             }
         }
+
+        v0++;
+        // reset
+        indices[n++] = v1-1;
+        indices[n++] = v0;
+
+        // skirt
+        for (int x = 0; x < patch_size_in_verts; ++x)
+        {
+            indices[n++] = v0++;
+            indices[n++] = v1++;
+        }
+
         assert(n == indices_total);
     }
 
     VertexFormat vf = {};
-    AddVertexAttribute(vf, 0, 2, GL_FLOAT, false);
+    AddVertexAttribute(vf, 0, 3, GL_FLOAT, false);
 
     GLuint vertex_buffer = CreateVertexBuffer(sizeof(verts), verts);
     GLuint index_buffer = CreateIndexBuffer(sizeof(indices), indices);
     GLuint vertex_array = CreateVertexArray(vertex_buffer, vf, index_buffer);
 
-    const int tex_size = patch_size_in_verts + 2;
-    const int tex_data_size = Square(tex_size);
-    float tex_data[tex_data_size];
-    for (int i = 0; i < tex_data_size; i++)
-    {
-        tex_data[i] = Sin(i*0.31f + 0.121f) + Cos(i*1.91f + 5.02f);
-    }
-
-    GLuint height_map = CreateTexture2D(tex_size, tex_size,
-                                        GL_RED, GL_FLOAT, tex_data);
-    p.hmap.texture = height_map;
+    p.hmap.texture = 0;
     p.hmap.bind_index = 0;
 
     InitTexUniforms(p.uniforms.hmap, shader, "HeightMap");
+
+    const int tex_size = patch_size_in_verts + 2;
     p.uniforms.hmap.corners.value.v2[0] = V2(1.5f / tex_size);
     p.uniforms.hmap.corners.value.v2[1] = V2((tex_size - 1.5f) / tex_size);
     p.uniforms.hmap.pixel_size.value.v2[0] = V2(1.0f / tex_size);
@@ -641,7 +667,7 @@ int main(int argc, char **argv)
     glDepthFunc(GL_LEQUAL);
     glEnable(GL_DEPTH_TEST);
 
-    glFrontFace(GL_CCW);
+    glFrontFace(GL_CW);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 
@@ -673,7 +699,6 @@ int main(int argc, char **argv)
 
     while (running)
     {
-
         // Handle events
         for (SDL_Event event; SDL_PollEvent(&event); )
         {
