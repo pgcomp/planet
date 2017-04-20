@@ -77,9 +77,10 @@ int MapFind(const HeightMapCache &cache, QuadID key, QuadID find)
 #undef U64
 
 #define STB_PERLIN_IMPLEMENTATION
-#include "stb_perlin.h"
+#include "stb_perlin_double.h"
 
-GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q, int tick)
+GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q,
+                           int max_depth, int tick)
 {
     int index = MapFind(cache, q.id, q.id);
 
@@ -87,28 +88,33 @@ GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q, int tick)
     {
         float data[32][32];
 
-        double scale = 0.0005;
-        Vec3 p0 = V3(q.p[0] * scale);
-        Vec3 p1 = V3(q.p[1] * scale);
-        Vec3 p2 = V3(q.p[2] * scale);
-        Vec3 p3 = V3(q.p[3] * scale);
+        double scale = 0.00001;
+        Vec3d p0 = q.p[0] * scale;
+        Vec3d p1 = q.p[1] * scale;
+        Vec3d p2 = q.p[2] * scale;
+        Vec3d p3 = q.p[3] * scale;
 
-        Vec3 v0 = p1 - p0;
-        Vec3 v1 = p3 - p2;
+        Vec3d v0 = p1 - p0;
+        Vec3d v1 = p3 - p2;
+
+        int depth = GetDepth(q.id);
+        int octaves = 6 + 12 * depth / max_depth;
 
         for (int y = 0; y < 32; y++)
         {
-            float v = (y - 1) / 30.0f;
+            double v = (y - 1) / 29.0;
             for (int x = 0; x < 32; x++)
             {
-                float u = (x - 1) / 30.0f;
-                Vec3 q0 = p0 + v0 * u;
-                Vec3 q1 = p2 + v1 * u;
-                Vec3 v2 = q1 - q0;
-                Vec3 p = q0 + v2 * v;
+                double u = (x - 1) / 29.0;
+                Vec3d q0 = p0 + v0 * u;
+                Vec3d q1 = p2 + v1 * u;
+                Vec3d v2 = q1 - q0;
+                Vec3d p = q0 + v2 * v;
 
-                data[y][x] = 500.0f *
-                    stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.5f, 6, 0, 0, 0);
+                data[y][x] = 8848.0f *
+                    stb_perlin_ridge_noise3(p.x, p.y, p.z, 2.0f, 0.55f, 1.0f, octaves, 0, 0, 0);
+                    //stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
+                    //stb_perlin_turbulence_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
             }
         }
 
@@ -253,7 +259,8 @@ bool InitPlanet(Planet &p, double radius)
 
              void main() {
              vec3 n = normalize(Normal);
-             float light = 0.001 + max(0.0, dot(n, vec3(0.0, 0.0, -1.0)));
+             vec3 l = normalize(vec3(0.0, 1.0, -1.0));
+             float light = 0.001 + max(0.0, dot(n, l));
              gl_FragColor = vec4(vec3(sqrt(light)), 1.0);
              //gl_FragColor = vec4(n * 0.5 + vec3(0.5), 1.0);
              });
@@ -569,7 +576,7 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
     {
         Quad &q = p.quads.data[i];
 
-        p.hmap.texture = GetHeightMapForQuad(p.cache, q, tick);
+        p.hmap.texture = GetHeightMapForQuad(p.cache, q, p.max_lod, tick);
 
         for (int j = 0; j < 4; ++j)
         {
