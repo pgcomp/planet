@@ -620,7 +620,8 @@ int main(int argc, char **argv)
                                           SDL_WINDOWPOS_UNDEFINED,
                                           SDL_WINDOWPOS_UNDEFINED,
                                           window_w, window_h,
-                                          SDL_WINDOW_OPENGL);
+                                          SDL_WINDOW_OPENGL|
+                                          SDL_WINDOW_RESIZABLE);
 
     if (window == nullptr)
     {
@@ -702,39 +703,67 @@ int main(int argc, char **argv)
         // Handle events
         for (SDL_Event event; SDL_PollEvent(&event); )
         {
-            if (event.type == SDL_QUIT)
+            switch (event.type)
             {
-                running = false;
-                break;
-            }
-
-            if (event.type == SDL_KEYDOWN)
-            {
-                if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE)
+                case SDL_QUIT:
                 {
                     running = false;
                     break;
                 }
-                switch (event.key.keysym.scancode)
+
+                case SDL_WINDOWEVENT:
                 {
-                    case SDL_SCANCODE_1: move_speed = 1.0e1; break;
-                    case SDL_SCANCODE_2: move_speed = 1.0e2; break;
-                    case SDL_SCANCODE_3: move_speed = 1.0e3; break;
-                    case SDL_SCANCODE_4: move_speed = 1.0e4; break;
-                    case SDL_SCANCODE_5: move_speed = 1.0e5; break;
-                    case SDL_SCANCODE_6: move_speed = 1.0e6; break;
-                    case SDL_SCANCODE_7: move_speed = 1.0e7; break;
-                    case SDL_SCANCODE_8: move_speed = 1.0e8; break;
-                    //case SDL_SCANCODE_9: move_speed = 1.0e9; break;
-                    //case SDL_SCANCODE_0: move_speed = 1.0e10; break;
-                    case SDL_SCANCODE_P:
+                    switch(event.window.event)
                     {
-                        wire_frame = !wire_frame;
-                        glPolygonMode(GL_FRONT, wire_frame ? GL_LINE : GL_FILL);
-                        break;
+                        case SDL_WINDOWEVENT_RESIZED:
+                        {
+                            window_w = event.window.data1;
+                            window_h = event.window.data2;
+                            glViewport(0, 0, window_w, window_h);
+                            break;
+                        }
+
+                        default: break;
                     }
-                    default: break;
+
+                    break;
                 }
+
+                case SDL_KEYDOWN:
+                {
+                    switch (event.key.keysym.scancode)
+                    {
+                        case SDL_SCANCODE_ESCAPE:
+                        {
+                            running = false;
+                            break;
+                        }
+
+                        case SDL_SCANCODE_1: move_speed = 1.0e1; break;
+                        case SDL_SCANCODE_2: move_speed = 1.0e2; break;
+                        case SDL_SCANCODE_3: move_speed = 1.0e3; break;
+                        case SDL_SCANCODE_4: move_speed = 1.0e4; break;
+                        case SDL_SCANCODE_5: move_speed = 1.0e5; break;
+                        case SDL_SCANCODE_6: move_speed = 1.0e6; break;
+                        case SDL_SCANCODE_7: move_speed = 1.0e7; break;
+                        case SDL_SCANCODE_8: move_speed = 1.0e8; break;
+                        //case SDL_SCANCODE_9: move_speed = 1.0e9; break;
+                        //case SDL_SCANCODE_0: move_speed = 1.0e10; break;
+
+                        case SDL_SCANCODE_P:
+                        {
+                            wire_frame = !wire_frame;
+                            glPolygonMode(GL_FRONT, wire_frame ? GL_LINE : GL_FILL);
+                            break;
+                        }
+
+                        default: break;
+                    }
+
+                    break;
+                }
+
+                default: break;
             }
         }
 
