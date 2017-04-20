@@ -14,17 +14,6 @@ struct QuadID
     uint64_t value;
 };
 
-inline QuadID MakeID(uint64_t root, uint64_t depth, uint64_t index)
-{
-    assert(root < U64(6));
-    assert(depth < U64(32));
-    assert(index < (U64(1) << U64(64 - 9)));
-    // only valid ids have highest bit set -> zero id is invalid, yay!
-    uint64_t highest_bit = U64(1) << U64(64 - 1);
-    uint64_t id = (highest_bit | (root << U64(64 - 4)) | (depth << U64(64 - 9)) | index);
-    return {id};
-}
-
 #define GET_BITS(value, first, count) (((value)>>U64(first)) & ((U64(1)<<U64(count))-U64(1)))
 
 inline uint64_t GetRoot(QuadID id)  { return GET_BITS(id.value, 64 - 4, 3); }
@@ -32,6 +21,25 @@ inline uint64_t GetDepth(QuadID id) { return GET_BITS(id.value, 64 - 9, 5); }
 inline uint64_t GetIndex(QuadID id) { return GET_BITS(id.value, 0, 64 - 9); }
 
 #undef GET_BITS
+
+inline QuadID MakeRootID(uint64_t root)
+{
+    assert(root < U64(6));
+    // only valid ids have highest bit set -> zero id is invalid, yay!
+    uint64_t highest_bit = U64(1) << U64(64 - 1);
+    uint64_t value = highest_bit | (root << U64(64 - 4));
+    return {value};
+}
+
+inline QuadID MakeChildID(QuadID id, uint64_t child_index)
+{
+    uint64_t depth = GetDepth(id);
+    assert(child_index < U64(4));
+    assert(depth + U64(1) < U64(32));
+    uint64_t depth_bit = U64(1) << U64(64 - 9);
+    uint64_t value = (id.value + depth_bit) | (child_index << U64(2*depth));
+    return {value};
+}
 
 
 struct Quad
@@ -59,9 +67,10 @@ int MapFind(const HeightMapCache &cache, QuadID key, QuadID find)
 {
     assert(key.value != U64(0));
 
+    // TODO: Better hash
+    uint32_t hash = uint32_t(key.value) ^ uint32_t(key.value >> 32);
     for (int i = 0; i < MAP_MAX; i++)
     {
-        uint32_t hash = uint32_t(key.value) ^ uint32_t(key.value >> 32);
         int index = (hash + i) % MAP_MAX;
         if (cache.quad_ids[index].value == find.value)
         {
@@ -79,6 +88,43 @@ int MapFind(const HeightMapCache &cache, QuadID key, QuadID find)
 #define STB_PERLIN_IMPLEMENTATION
 #include "stb_perlin_double.h"
 
+inline float GetHeightAt(Vec3d p, int depth, int max_depth)
+{
+    int octaves = 6 + 12 * depth / max_depth;
+    p *= 0.00001;
+    float h = stb_perlin_ridge_noise3(p.x, p.y, p.z, 2.0f, 0.55f, 1.0f, octaves, 0, 0, 0);
+    //float h = stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
+    //float h = stb_perlin_turbulence_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
+    return h * 8848.0f;
+}
+
+void GenerateHeightMap(float *data, int dim, const Quad &q, int max_depth)
+{
+    assert(dim > 3);
+
+    int depth = GetDepth(q.id);
+
+    Vec3d v0 = q.p[1] - q.p[0];
+    Vec3d v1 = q.p[3] - q.p[2];
+
+    double div = 1.0/(dim - 3);
+    for (int y = 0; y < dim; y++)
+    {
+        for (int x = 0; x < dim; x++)
+        {
+            double u = (x - 1)*div;
+            double v = (y - 1)*div;
+
+            Vec3d p0 = q.p[0] + v0 * u;
+            Vec3d p1 = q.p[2] + v1 * u;
+            Vec3d v2 = p1 - p0;
+            Vec3d p = p0 + v2 * v;
+
+            data[y*dim + x] = GetHeightAt(p, depth, max_depth);
+        }
+    }
+}
+
 GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q,
                            int max_depth, int tick)
 {
@@ -86,39 +132,11 @@ GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q,
 
     if (index < 0)
     {
-        float data[32][32];
+        const int dim = 32;
+        float data[dim*dim];
+        GenerateHeightMap(data, dim, q, max_depth);
 
-        double scale = 0.00001;
-        Vec3d p0 = q.p[0] * scale;
-        Vec3d p1 = q.p[1] * scale;
-        Vec3d p2 = q.p[2] * scale;
-        Vec3d p3 = q.p[3] * scale;
-
-        Vec3d v0 = p1 - p0;
-        Vec3d v1 = p3 - p2;
-
-        int depth = GetDepth(q.id);
-        int octaves = 6 + 12 * depth / max_depth;
-
-        for (int y = 0; y < 32; y++)
-        {
-            double v = (y - 1) / 29.0;
-            for (int x = 0; x < 32; x++)
-            {
-                double u = (x - 1) / 29.0;
-                Vec3d q0 = p0 + v0 * u;
-                Vec3d q1 = p2 + v1 * u;
-                Vec3d v2 = q1 - q0;
-                Vec3d p = q0 + v2 * v;
-
-                data[y][x] = 8848.0f *
-                    stb_perlin_ridge_noise3(p.x, p.y, p.z, 2.0f, 0.55f, 1.0f, octaves, 0, 0, 0);
-                    //stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
-                    //stb_perlin_turbulence_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
-            }
-        }
-
-        GLuint height_map = CreateTexture2D(32, 32, GL_RED, GL_FLOAT, data);
+        GLuint height_map = CreateTexture2D(dim, dim, GL_RED, GL_FLOAT, data);
 
         if (cache.count == CACHE_MAX)
         {
@@ -427,7 +445,9 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
         return;
     }
 
-    Vec3d mid = Normalize(q.p[0] + q.p[1] + q.p[2] + q.p[3]) * p.radius;
+    Vec3d mid_n = Normalize(q.p[0] + q.p[1] + q.p[2] + q.p[3]);
+    Vec3d mid = mid_n * p.radius;
+    Vec3d mid_p = mid + GetHeightAt(mid, 0, 1) * mid_n;
 
     // Let's assume the quad is a screen aligned square.
     // s = side of the square
@@ -444,7 +464,7 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
     // Diagonal is about sqrt(2) times the side.
     double avg_diagonal_sq = (LengthSq(d1) + LengthSq(d2)) * 0.5;
     double side_sq = avg_diagonal_sq * 0.5; // (diag/sqrt(2))^2 = (diag^2)/2
-    double dist_sq = LengthSq(mid - cam.position);
+    double dist_sq = LengthSq(mid_p - cam.position);
     double f = Square(cam.proj_factor) / cam.aspect_ratio;
 
     double ndc_area = side_sq*f / dist_sq;
@@ -470,17 +490,10 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
         q.p[2], VERT(2, 3), q.p[3],
     };
 
-    uint64_t root = GetRoot(q.id);
-    uint64_t depth = GetDepth(q.id);
-    uint64_t index0 = GetIndex(q.id);
-    uint64_t index1 = index0 | (1ull << (2ull*depth));
-    uint64_t index2 = index0 | (2ull << (2ull*depth));
-    uint64_t index3 = index0 | (3ull << (2ull*depth));
-
-    ProcessQuad(p, QUAD(0, 1, 3, 4, MakeID(root, depth + 1, index0)), cam, lod - 1);
-    ProcessQuad(p, QUAD(1, 2, 4, 5, MakeID(root, depth + 1, index1)), cam, lod - 1);
-    ProcessQuad(p, QUAD(3, 4, 6, 7, MakeID(root, depth + 1, index2)), cam, lod - 1);
-    ProcessQuad(p, QUAD(4, 5, 7, 8, MakeID(root, depth + 1, index3)), cam, lod - 1);
+    ProcessQuad(p, QUAD(0, 1, 3, 4, MakeChildID(q.id, 0)), cam, lod - 1);
+    ProcessQuad(p, QUAD(1, 2, 4, 5, MakeChildID(q.id, 1)), cam, lod - 1);
+    ProcessQuad(p, QUAD(3, 4, 6, 7, MakeChildID(q.id, 2)), cam, lod - 1);
+    ProcessQuad(p, QUAD(4, 5, 7, 8, MakeChildID(q.id, 3)), cam, lod - 1);
 
 #undef VERT
 #undef QUAD
@@ -491,8 +504,8 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
     ListResize(p.quads, 0);
 
 #define VERT(x, y, z) Normalize(V3d(x, y, z)) * p.radius
-#define QUAD(a, b, c, d, root) \
-    (Quad){verts[a], verts[b], verts[d], verts[c], MakeID(root, 0, 0)}
+#define QUAD(a, b, c, d, id) \
+    (Quad){verts[a], verts[b], verts[d], verts[c], id}
 
     Vec3d verts[] =
     {
@@ -506,12 +519,12 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
         VERT(-1,  1,  1), // 7
     };
 
-    ProcessQuad(p, QUAD(0, 1, 2, 3, 0), cam, p.max_lod); // front
-    ProcessQuad(p, QUAD(1, 5, 6, 2, 1), cam, p.max_lod); // right
-    ProcessQuad(p, QUAD(5, 4, 7, 6, 2), cam, p.max_lod); // back
-    ProcessQuad(p, QUAD(4, 0, 3, 7, 3), cam, p.max_lod); // left
-    ProcessQuad(p, QUAD(3, 2, 6, 7, 4), cam, p.max_lod); // top
-    ProcessQuad(p, QUAD(4, 5, 1, 0, 5), cam, p.max_lod); // bottom
+    ProcessQuad(p, QUAD(0, 1, 2, 3, MakeRootID(0)), cam, p.max_lod); // front
+    ProcessQuad(p, QUAD(1, 5, 6, 2, MakeRootID(1)), cam, p.max_lod); // right
+    ProcessQuad(p, QUAD(5, 4, 7, 6, MakeRootID(2)), cam, p.max_lod); // back
+    ProcessQuad(p, QUAD(4, 0, 3, 7, MakeRootID(3)), cam, p.max_lod); // left
+    ProcessQuad(p, QUAD(3, 2, 6, 7, MakeRootID(4)), cam, p.max_lod); // top
+    ProcessQuad(p, QUAD(4, 5, 1, 0, MakeRootID(5)), cam, p.max_lod); // bottom
 
 #undef VERT
 #undef QUAD
