@@ -7,6 +7,35 @@
 #define ArrayCount(arr) (sizeof(arr)/sizeof(*arr))
 
 
+inline uint64_t GetMicroTicks()
+{
+    static Uint64 freq = SDL_GetPerformanceFrequency();
+    return SDL_GetPerformanceCounter()*1000000ull / freq;
+}
+
+static bool print_timings = false;
+static uint64_t frame_start_time = 0;
+
+#define PRINT_TIMING(timer_name, timer_var) if (print_timings) printf("%-20s %10u us\n", timer_name, uint32_t(GetMicroTicks() - timer_var))
+
+struct ScopeTimer
+{
+    const char *name;
+    uint64_t start_time;
+    ScopeTimer(const char *n) : name(n), start_time(GetMicroTicks()) {}
+    ~ScopeTimer() { PRINT_TIMING(name, start_time); }
+};
+
+#define START_TIMING() print_timings = true
+#define STOP_TIMING() print_timings = false
+#define TOGGLE_TIMING() print_timings = !print_timings
+#define START_FRAME() PRINT_TIMING("FRAME TIME", frame_start_time); printf("\n"); frame_start_time = GetMicroTicks()
+#define BEGIN_TIMED_BLOCK(id) uint64_t _timed_block_##id = GetMicroTicks()
+#define END_TIMED_BLOCK(id) PRINT_TIMING(#id, _timed_block_##id)
+#define TIMED_SCOPE(id) ScopeTimer _timed_scope_##id(__FUNCTION__ " " #id)
+#define TIMED_FUNCTION() ScopeTimer JOIN(_timed_function_, __LINE__)(__FUNCTION__)
+
+
 #define U64(x) ((uint64_t)(x))
 
 struct QuadID
@@ -95,6 +124,8 @@ inline float GetHeightAt(Vec3d p, int depth, int max_depth)
 
 void GenerateHeightMap(float *data, int dim, const Quad &q, int max_depth)
 {
+    TIMED_FUNCTION();
+
     assert(dim > 3);
 
     int depth = GetDepth(q.id);
@@ -402,7 +433,6 @@ bool InitPlanet(Planet &p, double radius)
 
     // s = 2*pi*r/(4*q)*p_scale*8*h_scale
     p.max_skirt_size = (2*PI*radius)/(4*patch_size_in_quads)*0.00001*8*8848.0;
-    printf("%f\n", p.max_skirt_size);
 
     DrawItem &d = p.patch;
     d.shader = shader;
@@ -718,7 +748,11 @@ int main(int argc, char **argv)
 
     while (running)
     {
+        START_FRAME();
+
         // Handle events
+        BEGIN_TIMED_BLOCK(EventHandling);
+
         for (SDL_Event event; SDL_PollEvent(&event); )
         {
             switch (event.type)
@@ -785,6 +819,12 @@ int main(int argc, char **argv)
                             break;
                         }
 
+                        case SDL_SCANCODE_T:
+                        {
+                            TOGGLE_TIMING();
+                            break;
+                        }
+
                         default: break;
                     }
 
@@ -794,6 +834,11 @@ int main(int argc, char **argv)
                 default: break;
             }
         }
+
+        END_TIMED_BLOCK(EventHandling);
+
+
+        BEGIN_TIMED_BLOCK(UpdateSimulation);
 
         const Uint8 *keys = SDL_GetKeyboardState(nullptr);
 
@@ -845,6 +890,11 @@ int main(int argc, char **argv)
                          V3d(rotation[1]) * move.y +
                          V3d(rotation[2]) * move.z) * move_speed * dt;
 
+        END_TIMED_BLOCK(UpdateSimulation);
+
+
+        BEGIN_TIMED_BLOCK(Rendering);
+
         float fovy = DegToRad(50.0f);
         float aspect = (float)window_w/window_h;
         float near = 1.0f;
@@ -863,8 +913,16 @@ int main(int argc, char **argv)
 
         RenderPlanet(planet, cam_info);
 
+        END_TIMED_BLOCK(Rendering);
+
+
+        BEGIN_TIMED_BLOCK(DrawScreen);
+
         SDL_GL_SwapWindow(window);
         SDL_Delay(10);
+
+        END_TIMED_BLOCK(DrawScreen);
+
 
         // Check GL errors
         for (GLenum err; (err = glGetError()) != GL_NO_ERROR; )
