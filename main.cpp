@@ -49,8 +49,8 @@ struct Quad
 };
 
 
-#define CACHE_MAX 512
-#define MAP_MAX 661 // prime
+#define CACHE_MAX 1024 //512
+#define MAP_MAX 1499 //661 // prime
 
 struct HeightMapCache
 {
@@ -59,9 +59,6 @@ struct HeightMapCache
     GLuint height_maps[MAP_MAX];
     uint32_t last_tick_used[MAP_MAX];
 };
-
-// TODO: Remove
-static int fast_count = 0;
 
 int MapFind(const HeightMapCache &cache, QuadID key, QuadID find)
 {
@@ -74,8 +71,6 @@ int MapFind(const HeightMapCache &cache, QuadID key, QuadID find)
         int index = (hash + i) % MAP_MAX;
         if (cache.quad_ids[index].value == find.value)
         {
-            if (key.value == find.value && i < 10)
-                fast_count++;
             return index;
         }
     }
@@ -141,12 +136,12 @@ GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q,
         if (cache.count == CACHE_MAX)
         {
             int lru;
-            uint32_t delta_ticks = 0;
+            int delta_ticks = -1;
 
             for (int i = 0; i < MAP_MAX; i++)
             {
                 uint32_t t = cache.last_tick_used[i];
-                uint32_t delta = tick - t;
+                int delta = tick - t;
                 if (t != 0 && delta > delta_ticks)
                 {
                     lru = i;
@@ -175,6 +170,7 @@ struct Planet
 {
     double radius;
     int max_lod;
+    float max_skirt_size;
     DrawItem patch;
     Texture hmap;
     struct
@@ -183,6 +179,7 @@ struct Planet
         Uniform view;
         Uniform p;
         Uniform n;
+        Uniform skirt_size;
         TexUniforms hmap;
     } uniforms;
     List<Quad> quads;
@@ -200,6 +197,7 @@ bool InitPlanet(Planet &p, double radius)
              uniform mat4 View;
              uniform vec3 P[4];
              uniform vec3 N[4];
+             uniform float SkirtSize;
 
              out vec3 Normal;
 
@@ -268,7 +266,7 @@ bool InitPlanet(Planet &p, double radius)
              vec3 t = normalize(cross(n, q.p - p.p));
              vec3 bi = normalize(cross(t, n));
              Normal = normalize(mat3(t, n, bi) * normal);
-             float h = height - 1000.0*UV.z;
+             float h = height - SkirtSize*UV.z;
              gl_Position = Projection * View * vec4(v.p + n*h, 1.0);
              },
 
@@ -395,11 +393,16 @@ bool InitPlanet(Planet &p, double radius)
     InitUniform(p.uniforms.view, shader, "View", Uniform::MAT4);
     InitUniform(p.uniforms.p, shader, "P", Uniform::VEC3, 4);
     InitUniform(p.uniforms.n, shader, "N", Uniform::VEC3, 4);
+    InitUniform(p.uniforms.skirt_size, shader, "SkirtSize", Uniform::FLOAT);
 
     p.radius = radius;
 
     // l = log_2(2*pi*r/q) - 2
     p.max_lod = Log2(2.0*PI*radius/patch_size_in_quads) - 2;
+
+    // s = 2*pi*r/(4*q)*p_scale*8*h_scale
+    p.max_skirt_size = (2*PI*radius)/(4*patch_size_in_quads)*0.00001*8*8848.0;
+    printf("%f\n", p.max_skirt_size);
 
     DrawItem &d = p.patch;
     d.shader = shader;
@@ -436,52 +439,48 @@ void InitCameraInfo(CameraInfo &info, float fovy_rad, float aspect_ratio,
     info.far_plane = far_plane;
 }
 
-void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
+void ProcessQuad(Planet &planet, const Quad &q, const CameraInfo &cam, int lod)
 {
     if (lod == 0)
     {
         // No more splitting
-        ListAdd(p.quads, q);
+        ListAdd(planet.quads, q);
         return;
     }
 
     Vec3d mid_n = Normalize(q.p[0] + q.p[1] + q.p[2] + q.p[3]);
-    Vec3d mid = mid_n * p.radius;
-    Vec3d mid_p = mid + GetHeightAt(mid, 0, 1) * mid_n;
+    Vec3d mid = mid_n * planet.radius;
 
-    // Let's assume the quad is a screen aligned square.
-    // s = side of the square
-    // pf = 1.0/Tan(fovy)
-    // ar = aspect ratio
-    // z = distance to the camera
-    // The area of the NDC square is
-    // A = (s*pf/ar/z) * (s*pf/z) = (s^2)*(pf^2/ar)/(z^2)
+    Vec3d p[5];
+    for (int i = 0; i < 4; i++)
+        p[i] = q.p[i] + GetHeightAt(q.p[i], 0, 1)*Normalize(q.p[i]);
+    p[4] = mid + GetHeightAt(mid, 0, 1)*mid_n;
 
-    // Diagonals
-    Vec3d d1 = q.p[3] - q.p[0];
-    Vec3d d2 = q.p[2] - q.p[1];
+    bool split = false;
 
-    // Diagonal is about sqrt(2) times the side.
-    double avg_diagonal_sq = (LengthSq(d1) + LengthSq(d2)) * 0.5;
-    double side_sq = avg_diagonal_sq * 0.5; // (diag/sqrt(2))^2 = (diag^2)/2
-    double dist_sq = LengthSq(mid_p - cam.position);
-    double f = Square(cam.proj_factor) / cam.aspect_ratio;
+    double d =
+        (LengthSq(p[3] - p[0]) + LengthSq(p[2] - p[1]))
+        / (1.0 + 2.5*lod / planet.max_lod);
 
-    double ndc_area = side_sq*f / dist_sq;
-    double ndc_screen_area = Square(2.0);
-
-    if (ndc_area < 0.5*ndc_screen_area)
+    for (int i = 0; i < 5; i++)
     {
-        // No need to split
-        ListAdd(p.quads, q);
+        if (LengthSq(p[i] - cam.position)*2.0 < d)
+        {
+            split = true;
+            break;
+        }
+    }
+
+    if (!split)
+    {
+        ListAdd(planet.quads, q);
         return;
     }
 
     // Do split
 
-#define VERT(i, j) Normalize(q.p[i] + q.p[j]) * p.radius
-#define QUAD(a, b, c, d, id) \
-    (Quad){verts[a], verts[b], verts[c], verts[d], id}
+#define VERT(i, j) Normalize(q.p[i] + q.p[j]) * planet.radius
+#define QUAD(a, b, c, d, id) (Quad){verts[a], verts[b], verts[c], verts[d], id}
 
     Vec3d verts[] =
     {
@@ -490,22 +489,21 @@ void ProcessQuad(Planet &p, const Quad &q, const CameraInfo &cam, int lod)
         q.p[2], VERT(2, 3), q.p[3],
     };
 
-    ProcessQuad(p, QUAD(0, 1, 3, 4, MakeChildID(q.id, 0)), cam, lod - 1);
-    ProcessQuad(p, QUAD(1, 2, 4, 5, MakeChildID(q.id, 1)), cam, lod - 1);
-    ProcessQuad(p, QUAD(3, 4, 6, 7, MakeChildID(q.id, 2)), cam, lod - 1);
-    ProcessQuad(p, QUAD(4, 5, 7, 8, MakeChildID(q.id, 3)), cam, lod - 1);
+    ProcessQuad(planet, QUAD(0, 1, 3, 4, MakeChildID(q.id, 0)), cam, lod - 1);
+    ProcessQuad(planet, QUAD(1, 2, 4, 5, MakeChildID(q.id, 1)), cam, lod - 1);
+    ProcessQuad(planet, QUAD(3, 4, 6, 7, MakeChildID(q.id, 2)), cam, lod - 1);
+    ProcessQuad(planet, QUAD(4, 5, 7, 8, MakeChildID(q.id, 3)), cam, lod - 1);
 
 #undef VERT
 #undef QUAD
 }
 
-void RenderPlanet(Planet &p, const CameraInfo &cam)
+void RenderPlanet(Planet &planet, const CameraInfo &cam)
 {
-    ListResize(p.quads, 0);
+    ListResize(planet.quads, 0);
 
-#define VERT(x, y, z) Normalize(V3d(x, y, z)) * p.radius
-#define QUAD(a, b, c, d, id) \
-    (Quad){verts[a], verts[b], verts[d], verts[c], id}
+#define VERT(x, y, z) Normalize(V3d(x, y, z)) * planet.radius
+#define QUAD(a, b, c, d, id) (Quad){verts[a], verts[b], verts[d], verts[c], id}
 
     Vec3d verts[] =
     {
@@ -519,12 +517,12 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
         VERT(-1,  1,  1), // 7
     };
 
-    ProcessQuad(p, QUAD(0, 1, 2, 3, MakeRootID(0)), cam, p.max_lod); // front
-    ProcessQuad(p, QUAD(1, 5, 6, 2, MakeRootID(1)), cam, p.max_lod); // right
-    ProcessQuad(p, QUAD(5, 4, 7, 6, MakeRootID(2)), cam, p.max_lod); // back
-    ProcessQuad(p, QUAD(4, 0, 3, 7, MakeRootID(3)), cam, p.max_lod); // left
-    ProcessQuad(p, QUAD(3, 2, 6, 7, MakeRootID(4)), cam, p.max_lod); // top
-    ProcessQuad(p, QUAD(4, 5, 1, 0, MakeRootID(5)), cam, p.max_lod); // bottom
+    ProcessQuad(planet, QUAD(0, 1, 2, 3, MakeRootID(0)), cam, planet.max_lod); // front
+    ProcessQuad(planet, QUAD(1, 5, 6, 2, MakeRootID(1)), cam, planet.max_lod); // right
+    ProcessQuad(planet, QUAD(5, 4, 7, 6, MakeRootID(2)), cam, planet.max_lod); // back
+    ProcessQuad(planet, QUAD(4, 0, 3, 7, MakeRootID(3)), cam, planet.max_lod); // left
+    ProcessQuad(planet, QUAD(3, 2, 6, 7, MakeRootID(4)), cam, planet.max_lod); // top
+    ProcessQuad(planet, QUAD(4, 5, 1, 0, MakeRootID(5)), cam, planet.max_lod); // bottom
 
 #undef VERT
 #undef QUAD
@@ -549,8 +547,8 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
     }
     view[3][3] = 1.0f;
 
-    p.uniforms.proj.value.m4 = projection;
-    p.uniforms.view.value.m4 = view;
+    planet.uniforms.proj.value.m4 = projection;
+    planet.uniforms.view.value.m4 = view;
 
 #if 0
     Vec3 colors[] =
@@ -585,29 +583,28 @@ void RenderPlanet(Planet &p, const CameraInfo &cam)
     static uint32_t tick = 0;
     tick++;
 
-    for (int i = 0; i < p.quads.num; ++i)
+    for (int i = 0; i < planet.quads.num; ++i)
     {
-        Quad &q = p.quads.data[i];
+        Quad &q = planet.quads.data[i];
 
-        p.hmap.texture = GetHeightMapForQuad(p.cache, q, p.max_lod, tick);
+        planet.hmap.texture =
+            GetHeightMapForQuad(planet.cache, q, planet.max_lod, tick);
 
         for (int j = 0; j < 4; ++j)
         {
-            Vec3d e = q.p[j] - cam.position;
+            Vec3d p = q.p[j] - cam.position;
             Vec3d n = Normalize(q.p[j]);
-            p.uniforms.p.value.v3[j] = V3(e.x, e.y, e.z);
-            p.uniforms.n.value.v3[j] = V3(n.x, n.y, n.z);
+            planet.uniforms.p.value.v3[j] = V3(p.x, p.y, p.z);
+            planet.uniforms.n.value.v3[j] = V3(n.x, n.y, n.z);
         }
 
-        Draw(p.patch);
-    }
+        float skirt_size = planet.max_skirt_size;
+        int depth = GetDepth(q.id) - 1;
+        if (depth > 0) skirt_size /= (2 << depth);
+        planet.uniforms.skirt_size.value.f[0] = skirt_size;
 
-    if ((float)fast_count/p.quads.num < 0.8f)
-    {
-        LOG_WARNING("Map slowness detected: Only %d/%d fetches were fast.",
-                    fast_count, p.quads.num);
+        Draw(planet.patch);
     }
-    fast_count = 0;
 }
 
 
@@ -693,6 +690,7 @@ int main(int argc, char **argv)
     glEnable(GL_CULL_FACE);
 
     bool wire_frame = false;
+    float temp_skirt_size = 0.0f;
 
     double radius = 6371000.0;
 
@@ -770,10 +768,20 @@ int main(int argc, char **argv)
                         //case SDL_SCANCODE_9: move_speed = 1.0e9; break;
                         //case SDL_SCANCODE_0: move_speed = 1.0e10; break;
 
+                        // Toggle wire frame
                         case SDL_SCANCODE_P:
                         {
                             wire_frame = !wire_frame;
                             glPolygonMode(GL_FRONT, wire_frame ? GL_LINE : GL_FILL);
+                            break;
+                        }
+
+                        // Toggle skirts
+                        case SDL_SCANCODE_K:
+                        {
+                            float temp = planet.max_skirt_size;
+                            planet.max_skirt_size = temp_skirt_size;
+                            temp_skirt_size = temp;
                             break;
                         }
 
@@ -804,8 +812,8 @@ int main(int argc, char **argv)
 
             char title[100];
             snprintf(title, sizeof(title),
-                     "frametime: %d, fps: %d, tris: %d",
-                     dt_ms, (int)(1.0/dt), tri_count);
+                     "frametime: %d, fps: %d, tris: %d, quads: %d",
+                     dt_ms, (int)(1.0/dt), tri_count, planet.quads.num);
             SDL_SetWindowTitle(window, title);
         }
 
