@@ -80,19 +80,31 @@ GLuint CreateVertexArray(GLuint vertex_buffer, VertexFormat &format,
 
 GLuint CompileShader(GLenum type, const char *source)
 {
-    const char *source_list[3];
-    source_list[0] = "#version 140\n";
-    source_list[1] = "\n";
-    source_list[2] = source;
+    const char *source_list[] = {
+        // 0 = Common header
+        "#version 140\n"
+        "#define SAMPLER(type, name, index) \\\n"
+        "uniform type name; \\\n"
+        "uniform vec2 name##_corners[2]; \\\n"
+        "uniform vec2 name##_pixel_size\n",
+        "",    // 1 = Shader specific header
+        source // 2 = User code
+    };
+
     if (type == GL_VERTEX_SHADER)
     {
         source_list[1] =
-            "#define VERTEX_SHADER\n"
+            "#define VERTEX_SHADER 1\n"
+            "#define FRAGMENT_SHADER 0\n"
             "#define ATTRIBUTE(type, name, index) in type name\n"
-            "#define SAMPLER(type, name, index) \\\n"
-            "uniform type name; \\\n"
-            "uniform vec2 name##_corners[2]; \\\n"
-            "uniform vec2 name##_pixel_size\n";
+            "#define VARYING(type, name) out type name\n";
+    }
+    else
+    {
+        source_list[1] =
+            "#define VERTEX_SHADER 0\n"
+            "#define FRAGMENT_SHADER 1\n"
+            "#define VARYING(type, name) in type name\n";
     }
 
     GLuint shader = glCreateShader(type);
@@ -106,7 +118,8 @@ GLuint CompileShader(GLenum type, const char *source)
 
     char info[256];
     glGetShaderInfoLog(shader, sizeof(info), 0, info);
-    LOG_ERROR("Couldn't compile shader:\n%s\n", info);
+    LOG_ERROR("Couldn't compile %s shader:\n%s\n",
+              (type == GL_VERTEX_SHADER) ? "vertex" : "fragment", info);
     glDeleteShader(shader);
     return 0;
 }

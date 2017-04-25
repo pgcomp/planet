@@ -6,6 +6,13 @@
 
 #define ArrayCount(arr) (sizeof(arr)/sizeof(*arr))
 
+#if 0
+extern "C"
+{
+    __attribute__ ((dllexport)) uint32_t NvOptimusEnablement = 0x00000001;
+    __attribute__ ((dllexport)) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
 
 inline uint64_t GetMicroTicks()
 {
@@ -219,98 +226,107 @@ struct Planet
 
 bool InitPlanet(Planet &p, double radius)
 {
-    const char *shader_source =
-        GLSL(ATTRIBUTE(vec3, UV, 0);
+    const char *shader_source = R"GLSL(
 
-             SAMPLER(sampler2D, HeightMap, 0);
+    VARYING(vec3, Normal);
 
-             uniform mat4 Projection;
-             uniform mat4 View;
-             uniform vec3 P[4];
-             uniform vec3 N[4];
-             uniform float SkirtSize;
+#if VERTEX_SHADER
 
-             out vec3 Normal;
+    ATTRIBUTE(vec3, UV, 0);
 
-             struct V { vec3 p; vec3 n; };
+    SAMPLER(sampler2D, HeightMap, 0);
 
-             V interpolate_linear(V v0, V v1, float t) {
-             vec3 n = normalize(mix(v0.n, v1.n, t));
-             vec3 p = mix(v0.p, v1.p, t);
+    uniform mat4 Projection;
+    uniform mat4 View;
+    uniform vec3 P[4];
+    uniform vec3 N[4];
+    uniform float SkirtSize;
 
-             V result;
-             result.p = p;
-             result.n = n;
-             return result;
-             }
+    struct V { vec3 p; vec3 n; };
 
-             V interpolate(V v0, V v1, float t) {
-             if (1.0 - dot(v0.n, v1.n) < 0.001)
-             return interpolate_linear(v0, v1, t);
+    V interpolate_linear(V v0, V v1, float t) {
+        vec3 n = normalize(mix(v0.n, v1.n, t));
+        vec3 p = mix(v0.p, v1.p, t);
 
-             // slerp normal
-             float theta2 = acos(dot(v0.n, v1.n));
-             float k = 1.0 - t;
-             vec3 n = normalize(sin(k*theta2)*v0.n + sin(t*theta2)*v1.n);
+        V result;
+        result.p = p;
+        result.n = n;
+        return result;
+    }
 
-             // compute position
-             float theta = theta2 * 0.5;
-             float gamma = theta - theta2*t;
-             float tan_theta = tan(theta);
-             float x = 1.0 - tan(gamma)/tan_theta;
-             float y = 1.0/sin(theta) - 1.0/(cos(gamma)*tan_theta);
-             vec3 v = (v1.p - v0.p) * 0.5;
-             vec3 p = v0.p + x*v + y*n*length(v);
+    V interpolate(V v0, V v1, float t) {
+        if (1.0 - dot(v0.n, v1.n) < 0.001)
+            return interpolate_linear(v0, v1, t);
 
-             V result;
-             result.p = p;
-             result.n = n;
-             return result;
-             }
+        // slerp normal
+        float theta2 = acos(dot(v0.n, v1.n));
+        float k = 1.0 - t;
+        vec3 n = normalize(sin(k*theta2)*v0.n + sin(t*theta2)*v1.n);
 
-             float sample_height(vec2 uv) {
-             return texture(HeightMap, uv).r;
-             }
+        // compute position
+        float theta = theta2 * 0.5;
+        float gamma = theta - theta2*t;
+        float tan_theta = tan(theta);
+        float x = 1.0 - tan(gamma)/tan_theta;
+        float y = 1.0/sin(theta) - 1.0/(cos(gamma)*tan_theta);
+        vec3 v = (v1.p - v0.p) * 0.5;
+        vec3 p = v0.p + x*v + y*n*length(v);
 
-             vec3 compute_normal(vec2 uv, float xyscale) {
-             vec3 offs = vec3(HeightMap_pixel_size.x, 0.0,
-                              HeightMap_pixel_size.y);
-             float x0 = sample_height(uv - offs.xy);
-             float x1 = sample_height(uv + offs.xy);
-             float y0 = sample_height(uv - offs.yz);
-             float y1 = sample_height(uv + offs.yz);
-             return normalize(vec3(x0 - x1, 2.0*xyscale, y0 - y1));
-             }
+        V result;
+        result.p = p;
+        result.n = n;
+        return result;
+    }
 
-             void main() {
-             V a; a.p = P[0]; a.n = N[0];
-             V b; b.p = P[1]; b.n = N[1];
-             V c; c.p = P[2]; c.n = N[2];
-             V d; d.p = P[3]; d.n = N[3];
-             V p = interpolate(a, b, UV.x);
-             V q = interpolate(c, d, UV.x);
-             V v = interpolate(p, q, UV.y);
-             vec2 uv = mix(HeightMap_corners[0], HeightMap_corners[1], UV.xy);
-             float height = sample_height(uv);
-             vec3 normal = compute_normal(uv, length(q.p - p.p) / 29.0);
-             vec3 n = v.n;
-             vec3 t = normalize(cross(n, q.p - p.p));
-             vec3 bi = normalize(cross(t, n));
-             Normal = normalize(mat3(t, n, bi) * normal);
-             float h = height - SkirtSize*UV.z;
-             gl_Position = Projection * View * vec4(v.p + n*h, 1.0);
-             },
+    float sample_height(vec2 uv) {
+        return texture(HeightMap, uv).r;
+    }
 
-             uniform vec3 Color;
-             in vec3 Normal;
+    vec3 compute_normal(vec2 uv, float xyscale) {
+        vec3 offs = vec3(HeightMap_pixel_size.x, 0.0,
+                         HeightMap_pixel_size.y);
+        float x0 = sample_height(uv - offs.xy);
+        float x1 = sample_height(uv + offs.xy);
+        float y0 = sample_height(uv - offs.yz);
+        float y1 = sample_height(uv + offs.yz);
+        return normalize(vec3(x0 - x1, 2.0*xyscale, y0 - y1));
+    }
 
-             void main() {
-             vec3 n = normalize(Normal);
-             vec3 l = normalize(vec3(0.0, 1.0, -1.0));
-             float light = 0.001 + max(0.0, dot(n, l));
-             gl_FragColor = vec4(vec3(sqrt(light)), 1.0);
-             //gl_FragColor = vec4(n * 0.5 + vec3(0.5), 1.0);
-             });
+    void main() {
+        V a; a.p = P[0]; a.n = N[0];
+        V b; b.p = P[1]; b.n = N[1];
+        V c; c.p = P[2]; c.n = N[2];
+        V d; d.p = P[3]; d.n = N[3];
+
+        V p = interpolate(a, b, UV.x);
+        V q = interpolate(c, d, UV.x);
+        V v = interpolate(p, q, UV.y);
+
+        vec2 uv = mix(HeightMap_corners[0], HeightMap_corners[1], UV.xy);
+
+        float height = sample_height(uv) - SkirtSize*UV.z;
+        vec3 normal = compute_normal(uv, length(q.p - p.p) / 29.0);
+        vec3 n = v.n;
+        vec3 t = normalize(cross(n, q.p - p.p));
+        vec3 bi = normalize(cross(t, n));
+        Normal = normalize(mat3(t, n, bi) * normal);
+        gl_Position = Projection * View * vec4(v.p + v.n*height, 1.0);
+    }
+
+#elif FRAGMENT_SHADER
+
+    out vec4 FragColor;
+
+    void main() {
+        vec3 n = normalize(Normal);
+        vec3 l = normalize(vec3(0.0, 1.0, -1.0));
+        float light = 0.001 + max(0.0, dot(n, l));
+        FragColor = vec4(vec3(sqrt(light)), 1.0);
+        //FragColor = vec4(n * 0.5 + vec3(0.5), 1.0);
+    }
+
+#endif)GLSL";
+    // END_GLSL
 
     GLuint shader = CreateShaderFromSource(shader_source);
     if (shader == 0)
