@@ -2,6 +2,7 @@
 #include "render.h"
 #include "list.h"
 #include "logging.h"
+#include "timing.h"
 #include "pp.h"
 
 #define ArrayCount(arr) (sizeof(arr)/sizeof(*arr))
@@ -13,34 +14,6 @@ extern "C"
     __attribute__ ((dllexport)) int AmdPowerXpressRequestHighPerformance = 1;
 }
 #endif
-
-inline uint64_t GetMicroTicks()
-{
-    static Uint64 freq = SDL_GetPerformanceFrequency();
-    return SDL_GetPerformanceCounter()*1000000ull / freq;
-}
-
-static bool print_timings = false;
-static uint64_t frame_start_time = 0;
-
-#define PRINT_TIMING(timer_name, timer_var) if (print_timings) printf("%-20s %10u us\n", timer_name, uint32_t(GetMicroTicks() - timer_var))
-
-struct ScopeTimer
-{
-    const char *name;
-    uint64_t start_time;
-    ScopeTimer(const char *n) : name(n), start_time(GetMicroTicks()) {}
-    ~ScopeTimer() { PRINT_TIMING(name, start_time); }
-};
-
-#define START_TIMING() print_timings = true
-#define STOP_TIMING() print_timings = false
-#define TOGGLE_TIMING() print_timings = !print_timings
-#define START_FRAME() PRINT_TIMING("FRAME TIME", frame_start_time); printf("\n"); frame_start_time = GetMicroTicks()
-#define BEGIN_TIMED_BLOCK(id) uint64_t _timed_block_##id = GetMicroTicks()
-#define END_TIMED_BLOCK(id) PRINT_TIMING(#id, _timed_block_##id)
-#define TIMED_SCOPE(id) ScopeTimer _timed_scope_##id(__FUNCTION__ " " #id)
-#define TIMED_FUNCTION() ScopeTimer JOIN(_timed_function_, __LINE__)(__FUNCTION__)
 
 
 #define U64(x) ((uint64_t)(x))
@@ -74,6 +47,22 @@ inline QuadID MakeChildID(QuadID id, uint64_t child_index)
     assert(depth + U64(1) < U64(32));
     uint64_t depth_bit = U64(1) << U64(64 - 9);
     uint64_t value = (id.value + depth_bit) | (child_index << U64(2*depth));
+    return {value};
+}
+
+inline uint64_t GetChildIndex(QuadID id)
+{
+    uint64_t depth = GetDepth(id);
+    return (id.value >> U64(2*(depth - 1))) & U64(3);
+}
+
+inline QuadID GetParentID(QuadID id)
+{
+    uint64_t depth = GetDepth(id);
+    assert(depth != 0);
+    uint64_t depth_bit = U64(1) << U64(64 - 9);
+    uint64_t mask = ~(U64(3) << U64(2*(depth - 1)));
+    uint64_t value = (id.value - depth_bit) & mask;
     return {value};
 }
 
@@ -116,93 +105,60 @@ int MapFind(const HeightMapCache &cache, QuadID key, QuadID find)
 
 #undef U64
 
-#define STB_PERLIN_IMPLEMENTATION
-#include "stb_perlin_double.h"
 
-inline float GetHeightAt(Vec3d p, int depth, int max_depth)
+struct HeightMapGenerator
 {
-    int octaves = 6 + 12 * depth / max_depth;
-    p *= 0.00001;
-    float h = stb_perlin_ridge_noise3(p.x, p.y, p.z, 2.0f, 0.55f, 1.0f, octaves, 0, 0, 0);
-    //float h = stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
-    //float h = stb_perlin_turbulence_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
-    return h * 8848.0f;
-}
+    float (*GetHeightAt)(const Vec3d &, int, int);
+    void (*GenerateHeightMap)(float *, int, const Quad &, int);
+};
 
-void GenerateHeightMap(float *data, int dim, const Quad &q, int max_depth)
+template<typename F>
+HeightMapGenerator CreateHeightMapGenerator()
 {
-    TIMED_FUNCTION();
-
-    assert(dim > 3);
-
-    int depth = GetDepth(q.id);
-
-    Vec3d v0 = q.p[1] - q.p[0];
-    Vec3d v1 = q.p[3] - q.p[2];
-
-    double div = 1.0/(dim - 3);
-    for (int y = 0; y < dim; y++)
+    struct Gen
     {
-        for (int x = 0; x < dim; x++)
+        static float GetHeightAt(const Vec3d &p, int depth, int max_depth)
         {
-            double u = (x - 1)*div;
-            double v = (y - 1)*div;
-
-            Vec3d p0 = q.p[0] + v0 * u;
-            Vec3d p1 = q.p[2] + v1 * u;
-            Vec3d v2 = p1 - p0;
-            Vec3d p = p0 + v2 * v;
-
-            data[y*dim + x] = GetHeightAt(p, depth, max_depth);
+            return F()(p, depth, max_depth);
         }
-    }
-}
 
-GLuint GetHeightMapForQuad(HeightMapCache &cache, const Quad &q,
-                           int max_depth, int tick)
-{
-    int index = MapFind(cache, q.id, q.id);
-
-    if (index < 0)
-    {
-        const int dim = 32;
-        float data[dim*dim];
-        GenerateHeightMap(data, dim, q, max_depth);
-
-        GLuint height_map = CreateTexture2D(dim, dim, GL_RED, GL_FLOAT, data);
-
-        if (cache.count == CACHE_MAX)
+        static void GenerateHeightMap(float *data, int dim, const Quad &q,
+                                      int max_depth)
         {
-            int lru;
-            int delta_ticks = -1;
+            TIMED_FUNCTION();
 
-            for (int i = 0; i < MAP_MAX; i++)
+            assert(dim > 3);
+
+            int depth = GetDepth(q.id);
+
+            Vec3d v0 = q.p[1] - q.p[0];
+            Vec3d v1 = q.p[3] - q.p[2];
+
+            double div = 1.0/(dim - 3);
+            for (int y = 0; y < dim; y++)
             {
-                uint32_t t = cache.last_tick_used[i];
-                int delta = tick - t;
-                if (t != 0 && delta > delta_ticks)
+                for (int x = 0; x < dim; x++)
                 {
-                    lru = i;
-                    delta_ticks = delta;
+                    double u = (x - 1)*div;
+                    double v = (y - 1)*div;
+
+                    Vec3d p0 = q.p[0] + v0 * u;
+                    Vec3d p1 = q.p[2] + v1 * u;
+                    Vec3d v2 = p1 - p0;
+                    Vec3d p = p0 + v2 * v;
+
+                    data[y*dim + x] = F()(p, depth, max_depth);
                 }
             }
-
-            DeleteTexture(cache.height_maps[lru]);
-            cache.quad_ids[lru] = QuadID{0};
-            cache.last_tick_used[lru] = 0;
-            cache.count--;
         }
+    };
 
-        index = MapFind(cache, q.id, QuadID{0});
-        cache.quad_ids[index] = q.id;
-        cache.height_maps[index] = height_map;
-        cache.count++;
-    }
+    HeightMapGenerator result;
+    result.GetHeightAt = Gen::GetHeightAt;
+    result.GenerateHeightMap = Gen::GenerateHeightMap;
+    return result;
+};
 
-    if (tick == 0) tick = 1; // zero means not in use
-    cache.last_tick_used[index] = tick;
-    return cache.height_maps[index];
-}
 
 struct Planet
 {
@@ -222,13 +178,144 @@ struct Planet
     } uniforms;
     List<Quad> quads;
     HeightMapCache cache;
+    HeightMapGenerator hmap_gen;
 };
 
-bool InitPlanet(Planet &p, double radius)
+
+struct TextureRect
+{
+    GLuint texture;
+    Vec2 corners[2];
+    Vec2 pixel_size;
+};
+
+TextureRect GetHeightMapForQuad(Planet &planet, const Quad &q, int tick,
+                                int &generations_per_frame_left)
+{
+    const int dim = 32;
+
+    TextureRect result = {};
+    result.corners[0] = V2(1.5f / dim);
+    result.corners[1] = V2((dim - 1.5f) / dim);
+    result.pixel_size = V2(1.0f / dim);
+
+    HeightMapCache &cache = planet.cache;
+
+    int index = MapFind(cache, q.id, q.id);
+
+    if (index < 0)
+    {
+        int depth = GetDepth(q.id);
+        if (generations_per_frame_left <= 0 && depth > 0)
+        {
+            QuadID parent_id = GetParentID(q.id);
+            index = MapFind(cache, parent_id, parent_id);
+            if (index >= 0)
+            {
+                int child_index = GetChildIndex(q.id);
+
+                float x0 = 1.5f;
+                float y0 = x0;
+                float x1 = dim / 2.0f - 0.5f;
+                float y1 = x1;
+
+                if (child_index == 1 || child_index == 3)
+                {
+                    x0 = dim / 2.0f + 0.5f;
+                    x1 = dim - 1.5f;
+                }
+
+                if (child_index == 2 || child_index == 3)
+                {
+                    y0 = dim / 2.0f + 0.5f;
+                    y1 = dim - 1.5f;
+                }
+
+                result.corners[0] = V2(x0 / dim, y0 / dim);
+                result.corners[1] = V2(x1 / dim, y1 / dim);
+                result.pixel_size = V2(((dim / 2.0f - 1.0f) / (dim - 3)) / dim);
+            }
+        }
+
+        if (generations_per_frame_left > 0 || index < 0)
+        {
+            generations_per_frame_left--;
+
+            float data[dim*dim];
+#if 1
+            planet.hmap_gen.GenerateHeightMap(data, dim, q, planet.max_lod);
+#else
+            BEGIN_TIMED_BLOCK(GenerateHeightMap);
+
+            assert(dim > 3);
+
+            int depth = GetDepth(q.id);
+
+            Vec3d v0 = q.p[1] - q.p[0];
+            Vec3d v1 = q.p[3] - q.p[2];
+
+            double div = 1.0/(dim - 3);
+            for (int y = 0; y < dim; y++)
+            {
+                for (int x = 0; x < dim; x++)
+                {
+                    double u = (x - 1)*div;
+                    double v = (y - 1)*div;
+
+                    Vec3d p0 = q.p[0] + v0 * u;
+                    Vec3d p1 = q.p[2] + v1 * u;
+                    Vec3d v2 = p1 - p0;
+                    Vec3d p = p0 + v2 * v;
+
+                    //data[y*dim + x] = planet.hmap_gen.GetHeightAt(p, depth, planet.max_lod);
+                    data[y*dim + x] = GenPerlinRidge(p, depth, planet.max_lod);
+                }
+            }
+
+            END_TIMED_BLOCK(GenerateHeightMap);
+#endif
+            GLuint height_map = CreateTexture2D(dim, dim, GL_RED, GL_FLOAT, data);
+
+            if (cache.count == CACHE_MAX)
+            {
+                int lru;
+                int delta_ticks = -1;
+
+                for (int i = 0; i < MAP_MAX; i++)
+                {
+                    uint32_t t = cache.last_tick_used[i];
+                    int delta = tick - t;
+                    if (t != 0 && delta > delta_ticks)
+                    {
+                        lru = i;
+                        delta_ticks = delta;
+                    }
+                }
+
+                DeleteTexture(cache.height_maps[lru]);
+                cache.quad_ids[lru] = QuadID{0};
+                cache.last_tick_used[lru] = 0;
+                cache.count--;
+            }
+
+            index = MapFind(cache, q.id, QuadID{0});
+            cache.quad_ids[index] = q.id;
+            cache.height_maps[index] = height_map;
+            cache.count++;
+        }
+    }
+
+    if (tick == 0) tick = 1; // zero means not in use
+    cache.last_tick_used[index] = tick;
+    result.texture = cache.height_maps[index];
+    return result;
+}
+
+bool InitPlanet(Planet &p, double radius, HeightMapGenerator hmap_gen)
 {
     const char *shader_source = R"GLSL(
 
-    VARYING(vec3, Normal);
+        VARYING(vec3, Normal);
 
 #if VERTEX_SHADER
 
@@ -431,11 +518,6 @@ bool InitPlanet(Planet &p, double radius)
 
     InitTexUniforms(p.uniforms.hmap, shader, "HeightMap");
 
-    const int tex_size = patch_size_in_verts + 2;
-    p.uniforms.hmap.corners.value.v2[0] = V2(1.5f / tex_size);
-    p.uniforms.hmap.corners.value.v2[1] = V2((tex_size - 1.5f) / tex_size);
-    p.uniforms.hmap.pixel_size.value.v2[0] = V2(1.0f / tex_size);
-
     InitUniform(p.uniforms.proj, shader, "Projection", Uniform::MAT4);
     InitUniform(p.uniforms.view, shader, "View", Uniform::MAT4);
     InitUniform(p.uniforms.p, shader, "P", Uniform::VEC3, 4);
@@ -443,6 +525,7 @@ bool InitPlanet(Planet &p, double radius)
     InitUniform(p.uniforms.skirt_size, shader, "SkirtSize", Uniform::FLOAT);
 
     p.radius = radius;
+    p.hmap_gen = hmap_gen;
 
     // l = log_2(2*pi*r/q) - 2
     p.max_lod = Log2(2.0*PI*radius/patch_size_in_quads) - 2;
@@ -499,8 +582,12 @@ void ProcessQuad(Planet &planet, const Quad &q, const CameraInfo &cam, int lod)
 
     Vec3d p[5];
     for (int i = 0; i < 4; i++)
-        p[i] = q.p[i] + GetHeightAt(q.p[i], 0, 1)*Normalize(q.p[i]);
-    p[4] = mid + GetHeightAt(mid, 0, 1)*mid_n;
+    {
+        float height = planet.hmap_gen.GetHeightAt(q.p[i], 0, 1);
+        p[i] = q.p[i] + Normalize(q.p[i]) * height;
+    }
+    float height = planet.hmap_gen.GetHeightAt(mid, 0, 1);
+    p[4] = mid + mid_n * height;
 
     bool split = false;
 
@@ -629,12 +716,18 @@ void RenderPlanet(Planet &planet, const CameraInfo &cam)
     static uint32_t tick = 0;
     tick++;
 
+    int generations_per_frame = 1;
+
     for (int i = 0; i < planet.quads.num; ++i)
     {
         Quad &q = planet.quads.data[i];
 
-        planet.hmap.texture =
-            GetHeightMapForQuad(planet.cache, q, planet.max_lod, tick);
+        TextureRect texrect = GetHeightMapForQuad(planet, q, tick,
+                                                  generations_per_frame);
+        planet.hmap.texture = texrect.texture;
+        planet.uniforms.hmap.corners.value.v2[0] = texrect.corners[0];
+        planet.uniforms.hmap.corners.value.v2[1] = texrect.corners[1];
+        planet.uniforms.hmap.pixel_size.value.v2[0] = texrect.pixel_size;
 
         for (int j = 0; j < 4; ++j)
         {
@@ -652,6 +745,11 @@ void RenderPlanet(Planet &planet, const CameraInfo &cam)
         Draw(planet.patch);
     }
 }
+
+
+
+#define STB_PERLIN_IMPLEMENTATION
+#include "stb_perlin_double.h"
 
 
 int main(int argc, char **argv)
@@ -740,8 +838,23 @@ int main(int argc, char **argv)
 
     double radius = 6371000.0;
 
+    struct PerlinRidge
+    {
+        inline float operator()(Vec3d p, int depth, int max_depth)
+        {
+            int octaves = 6 + 12 * depth / max_depth;
+            p *= 0.00001;
+            float h = stb_perlin_ridge_noise3(p.x, p.y, p.z, 2.0f, 0.55f, 1.0f, octaves, 0, 0, 0);
+            //float h = stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
+            //float h = stb_perlin_turbulence_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
+            return h * 8848.0f;
+        }
+    };
+
+    HeightMapGenerator hmap_gen = CreateHeightMapGenerator<PerlinRidge>();
+
     Planet planet = {};
-    if (!InitPlanet(planet, radius))
+    if (!InitPlanet(planet, radius, hmap_gen))
     {
         return 1;
     }
