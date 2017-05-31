@@ -5,8 +5,6 @@
 #include "timing.h"
 #include "pp.h"
 
-#define ArrayCount(arr) (sizeof(arr)/sizeof(*arr))
-
 #if 0
 extern "C"
 {
@@ -408,6 +406,7 @@ bool InitPlanet(Planet &p, double radius, HeightMapGenerator hmap_gen)
         vec3 n = normalize(Normal);
         vec3 l = normalize(vec3(0.0, 1.0, -1.0));
         float light = 0.001 + max(0.0, dot(n, l));
+        //FragColor = vec4(1.0);
         FragColor = vec4(vec3(sqrt(light)), 1.0);
         //FragColor = vec4(n * 0.5 + vec3(0.5), 1.0);
     }
@@ -543,7 +542,7 @@ bool InitPlanet(Planet &p, double radius, HeightMapGenerator hmap_gen)
     d.primitive_mode = GL_TRIANGLE_STRIP;
     d.index_type = GL_UNSIGNED_INT;
     d.first = 0;
-    d.count = ArrayCount(indices);
+    d.count = indices_total;
     d.draw_arrays = false;
 
     return true;
@@ -557,6 +556,10 @@ struct CameraInfo
     float aspect_ratio;
     float near_plane;
     float far_plane;
+
+    // adhock stuff
+    Vec3d real_pos;
+    bool draw_nodes;
 };
 
 void InitCameraInfo(CameraInfo &info, float fovy_rad, float aspect_ratio,
@@ -631,7 +634,7 @@ void ProcessQuad(Planet &planet, const Quad &q, const CameraInfo &cam, int lod)
 #undef QUAD
 }
 
-void RenderPlanet(Planet &planet, const CameraInfo &cam)
+void RenderPlanet(Planet &planet, CameraInfo cam)
 {
     ListResize(planet.quads, 0);
 
@@ -712,12 +715,18 @@ void RenderPlanet(Planet &planet, const CameraInfo &cam)
     };
 #endif
 
+    // Allows us to "freeze" LOD
+    Vec3d vantage_pos = cam.position;
+    cam.position = cam.real_pos;
+
     // TODO: Fix
     static uint32_t tick = 0;
     tick++;
 
-    int generations_per_frame = 1;
+    int generations_per_frame = 100;
 
+    //if (!cam.draw_nodes)
+    //{
     for (int i = 0; i < planet.quads.num; ++i)
     {
         Quad &q = planet.quads.data[i];
@@ -744,12 +753,97 @@ void RenderPlanet(Planet &planet, const CameraInfo &cam)
 
         Draw(planet.patch);
     }
+    //}
+#if 0
+    else
+    {
+        glUseProgram(0);
+
+        glMatrixMode(GL_PROJECTION);
+        glLoadMatrixf(projection.data[0]);
+        glMatrixMode(GL_MODELVIEW);
+        glLoadMatrixf(view.data[0]);
+
+        glBegin(GL_QUADS);
+        glColor3f(1.0f, 1.0f, 1.0f);
+        for (int i = 0; i < planet.quads.num; ++i)
+        {
+            Quad &q = planet.quads.data[i];
+            int indices[4] = {2, 3, 1, 0}; //{0, 1, 3, 2};
+            for (int j = 0; j < 4; ++j)
+            {
+                int index = indices[j];
+                Vec3d p = q.p[index] - cam.position;
+                glVertex3f(p.x, p.y, p.z);
+            }
+        }
+        glEnd();
+    }
+    glUseProgram(0);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadMatrixf(projection.data[0]);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadMatrixf(view.data[0]);
+
+    glBegin(GL_POINTS);
+    glColor3f(1.0f, 0.0f, 0.0f);
+    Vec3d p = vantage_pos - cam.position;
+    glVertex3f(p.x, p.y, p.z);
+    glEnd();
+#endif
 }
 
 
+#define PERLIN_IMPLEMENTATION
+#include "perlin.h"
 
-#define STB_PERLIN_IMPLEMENTATION
-#include "stb_perlin_double.h"
+float PerlinfBm(double x, double y, double z, double lacunarity, float gain, int octaves)
+{
+    //double lacunarity = 2.0;
+    //float gain = 0.5f;
+    //int octaves = 6;
+
+    double frequency = 1.0;
+    float amplitude = 1.0f;
+    float value = 0.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        value += PerlinNoise3(x*frequency, y*frequency, z*frequency)*amplitude;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return value;
+}
+
+float PerlinRidged(double x, double y, double z, double lacunarity, float gain, int octaves)
+{
+    //double lacunarity = 2.0;
+    //float gain = 0.5f;
+    float offset = 1.0f;
+    //int octaves = 6;
+
+    double frequency = 1.0;
+    float amplitude = 1.0f;
+    float weight = 1.0f;
+    float value = 0.0f;
+
+    for (int i = 0; i < octaves; ++i)
+    {
+        float v = PerlinNoise3(x*frequency, y*frequency, z*frequency);
+        v = (v < 0.0f) ? -v : v;
+        v = offset - v;
+        v = v*v;
+        value += v*amplitude*weight;
+        weight = v;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return value;
+}
 
 
 int main(int argc, char **argv)
@@ -833,25 +927,39 @@ int main(int argc, char **argv)
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 
+    //glLineWidth(1.5f);
+    //glPointSize(7.5f);
+
     bool wire_frame = false;
+    bool freeze_lod = false;
+    bool draw_nodes = false;
+    Vec3d freeze_pos = {};
     float temp_skirt_size = 0.0f;
 
     double radius = 6371000.0;
 
-    struct PerlinRidge
+    struct Perlin
     {
         inline float operator()(Vec3d p, int depth, int max_depth)
         {
             int octaves = 6 + 12 * depth / max_depth;
             p *= 0.00001;
-            float h = stb_perlin_ridge_noise3(p.x, p.y, p.z, 2.0f, 0.55f, 1.0f, octaves, 0, 0, 0);
-            //float h = stb_perlin_fbm_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
-            //float h = stb_perlin_turbulence_noise3(p.x, p.y, p.z, 2.0f, 0.55f, octaves, 0, 0, 0);
+            float h = PerlinRidged(p.x, p.y, p.z, 2.0f, 0.55f, octaves);
+            //float h = PerlinfBm(p.x, p.y, p.z, 2.0f, 0.55f, octaves);
             return h * 8848.0f;
         }
     };
 
-    HeightMapGenerator hmap_gen = CreateHeightMapGenerator<PerlinRidge>();
+    struct ConstantZero
+    {
+        inline float operator()(Vec3d p, int depth, int max_depth)
+        {
+            return 0.0f;
+        }
+    };
+
+    HeightMapGenerator hmap_gen = CreateHeightMapGenerator<Perlin>();
+    //HeightMapGenerator hmap_gen = CreateHeightMapGenerator<ConstantZero>();
 
     Planet planet = {};
     if (!InitPlanet(planet, radius, hmap_gen))
@@ -859,13 +967,65 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    struct
+    struct Camera
     {
         Vec3d position;
         Vec3 angles;
-    } cam = {};
+    };
 
-    cam.position.z = -radius - 10.0;
+    struct SaveState
+    {
+        Camera active_camera;
+        Camera saved_cameras[12];
+    };
+
+    SaveState save = {};
+    save.active_camera.position.z = -radius - 10.0;
+
+    const char *save_file_name = "save";
+
+    // Load state
+    {
+        FILE *f = fopen(save_file_name, "rb");
+        if (f)
+        {
+            SaveState temp = {};
+            size_t size = sizeof(SaveState);
+
+            if (fread(&temp, 1, size, f) == size)
+            {
+                save = temp;
+            }
+            else
+            {
+                LOG_WARNING("Couldn't read save file.");
+            }
+
+            fclose(f);
+        }
+    }
+
+    Camera cam = save.active_camera;
+
+    cam.position = V3d(0.0);
+    //cam.position.z = -(radius * 2.3);
+    cam.position.z = -radius - 1000.0;
+    cam.angles = V3(0.0f);
+    //cam.angles.x = DegToRad(90.0f);
+
+    //freeze_lod = true;
+
+    Vec3d frz_p[] =
+    {
+        V3d(radius * 0.25, -(radius * 0.25), -(radius * 2.0)),
+        V3d(radius * 0.25, -(radius * 0.25), -(radius * 1.5)),
+        V3d(radius * 0.25, -(radius * 0.25), -(radius * 1.3)),
+        V3d(radius * 0.25, -(radius * 0.25), -(radius * 1.2)),
+        V3d(radius * 0.25, -(radius * 0.25), -(radius * 1.0)),
+    };
+    int frz_i = 0;
+    int frz_mod = sizeof(frz_p) / sizeof(*frz_p);
+    freeze_pos = frz_p[frz_i];
 
     double move_speed = 1000.0; // m/s
     float look_speed = 2.0f; // rad/s
@@ -912,6 +1072,8 @@ int main(int argc, char **argv)
 
                 case SDL_KEYDOWN:
                 {
+                    bool shift = event.key.keysym.mod & KMOD_SHIFT;
+
                     switch (event.key.keysym.scancode)
                     {
                         case SDL_SCANCODE_ESCAPE:
@@ -931,11 +1093,55 @@ int main(int argc, char **argv)
                         //case SDL_SCANCODE_9: move_speed = 1.0e9; break;
                         //case SDL_SCANCODE_0: move_speed = 1.0e10; break;
 
+#define SAVE_CAM(index) case SDL_SCANCODE_F##index: { \
+                            Camera &saved = save.saved_cameras[index-1]; \
+                            if (shift) saved = cam; \
+                            else if (Length(saved.position) > 0.001) cam = saved; \
+                        } break
+
+                        SAVE_CAM(1);
+                        SAVE_CAM(2);
+                        SAVE_CAM(3);
+                        SAVE_CAM(4);
+                        SAVE_CAM(5);
+                        SAVE_CAM(6);
+                        SAVE_CAM(7);
+                        SAVE_CAM(8);
+                        SAVE_CAM(9);
+                        SAVE_CAM(10);
+                        SAVE_CAM(11);
+                        SAVE_CAM(12);
+
+#undef SAVE_CAM
+
                         // Toggle wire frame
                         case SDL_SCANCODE_P:
                         {
                             wire_frame = !wire_frame;
-                            glPolygonMode(GL_FRONT, wire_frame ? GL_LINE : GL_FILL);
+                            glPolygonMode(GL_FRONT_AND_BACK, wire_frame ? GL_LINE : GL_FILL);
+                            break;
+                        }
+
+                        // Toggle LOD freezing
+                        case SDL_SCANCODE_L:
+                        {
+                            freeze_lod = !freeze_lod;
+                            if (freeze_lod)
+                                freeze_pos = cam.position;
+                            break;
+                        }
+
+                        // Use next freeze pos
+                        case SDL_SCANCODE_J:
+                        {
+                            frz_i = (frz_i + 1) % frz_mod;
+                            freeze_pos = frz_p[frz_i];
+                            break;
+                        }
+
+                        case SDL_SCANCODE_N:
+                        {
+                            draw_nodes = !draw_nodes;
                             break;
                         }
 
@@ -1037,6 +1243,10 @@ int main(int argc, char **argv)
         cam_info.near_plane = near;
         cam_info.far_plane = far;
 
+        cam_info.real_pos = cam.position;
+        if (freeze_lod) cam_info.position = freeze_pos;
+        cam_info.draw_nodes = draw_nodes;
+
         // Render
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
@@ -1069,6 +1279,28 @@ int main(int argc, char **argv)
                 default: LOG_ERROR("Unknown GL error: %d", err);
 #undef CASE
             }
+        }
+    }
+
+    // Save state
+    {
+        save.active_camera = cam;
+
+        FILE *f = fopen(save_file_name, "wb");
+        if (f)
+        {
+            size_t size = sizeof(SaveState);
+
+            if (fwrite(&save, 1, size, f) != size)
+            {
+                LOG_ERROR("Couldn't write save file.");
+            }
+
+            fclose(f);
+        }
+        else
+        {
+            LOG_ERROR("Couldn't open save file for writing.");
         }
     }
 

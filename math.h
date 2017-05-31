@@ -66,6 +66,7 @@ inline Vec3d V3d(double x, double y, double z)
     return result;
 }
 
+inline Vec3d V3d(double s) { return V3d(s, s, s); }
 inline Vec3d V3d(const float *v) { return V3d(v[0], v[1], v[2]); }
 
 // Mat3
