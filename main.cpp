@@ -72,8 +72,8 @@ struct Quad
 };
 
 
-#define CACHE_MAX 1024 //512
-#define MAP_MAX 1499 //661 // prime
+#define CACHE_MAX 1024
+#define MAP_MAX 1499 // prime
 
 struct HeightMapCache
 {
@@ -163,6 +163,7 @@ struct Planet
     double radius;
     int max_lod;
     float max_skirt_size;
+    int render_tick;
     DrawItem patch;
     Texture hmap;
     struct
@@ -187,7 +188,7 @@ struct TextureRect
     Vec2 pixel_size;
 };
 
-TextureRect GetHeightMapForQuad(Planet &planet, const Quad &q, int tick,
+TextureRect GetHeightMapForQuad(Planet &planet, const Quad &q,
                                 int &generations_per_frame_left)
 {
     const int dim = 32;
@@ -240,50 +241,19 @@ TextureRect GetHeightMapForQuad(Planet &planet, const Quad &q, int tick,
             generations_per_frame_left--;
 
             float data[dim*dim];
-#if 1
             planet.hmap_gen.GenerateHeightMap(data, dim, q, planet.max_lod);
-#else
-            BEGIN_TIMED_BLOCK(GenerateHeightMap);
-
-            assert(dim > 3);
-
-            int depth = GetDepth(q.id);
-
-            Vec3d v0 = q.p[1] - q.p[0];
-            Vec3d v1 = q.p[3] - q.p[2];
-
-            double div = 1.0/(dim - 3);
-            for (int y = 0; y < dim; y++)
-            {
-                for (int x = 0; x < dim; x++)
-                {
-                    double u = (x - 1)*div;
-                    double v = (y - 1)*div;
-
-                    Vec3d p0 = q.p[0] + v0 * u;
-                    Vec3d p1 = q.p[2] + v1 * u;
-                    Vec3d v2 = p1 - p0;
-                    Vec3d p = p0 + v2 * v;
-
-                    //data[y*dim + x] = planet.hmap_gen.GetHeightAt(p, depth, planet.max_lod);
-                    data[y*dim + x] = GenPerlinRidge(p, depth, planet.max_lod);
-                }
-            }
-
-            END_TIMED_BLOCK(GenerateHeightMap);
-#endif
             GLuint height_map = CreateTexture2D(dim, dim, GL_RED, GL_FLOAT, data);
 
             if (cache.count == CACHE_MAX)
             {
-                int lru;
+                int lru = 0;
                 int delta_ticks = -1;
 
                 for (int i = 0; i < MAP_MAX; i++)
                 {
                     uint32_t t = cache.last_tick_used[i];
-                    int delta = tick - t;
-                    if (t != 0 && delta > delta_ticks)
+                    int delta = planet.render_tick - t;
+                    if (cache.quad_ids[i].value != 0 && delta > delta_ticks)
                     {
                         lru = i;
                         delta_ticks = delta;
@@ -292,7 +262,6 @@ TextureRect GetHeightMapForQuad(Planet &planet, const Quad &q, int tick,
 
                 DeleteTexture(cache.height_maps[lru]);
                 cache.quad_ids[lru] = QuadID{0};
-                cache.last_tick_used[lru] = 0;
                 cache.count--;
             }
 
@@ -303,8 +272,7 @@ TextureRect GetHeightMapForQuad(Planet &planet, const Quad &q, int tick,
         }
     }
 
-    if (tick == 0) tick = 1; // zero means not in use
-    cache.last_tick_used[index] = tick;
+    cache.last_tick_used[index] = planet.render_tick;
     result.texture = cache.height_maps[index];
     return result;
 }
@@ -526,10 +494,9 @@ bool InitPlanet(Planet &p, double radius, HeightMapGenerator hmap_gen)
     p.radius = radius;
     p.hmap_gen = hmap_gen;
 
-    // l = log_2(2*pi*r/q) - 2
     p.max_lod = Log2(2.0*PI*radius/patch_size_in_quads) - 2;
 
-    // s = 2*pi*r/(4*q)*p_scale*8*h_scale
+    // TODO: Compute somewhere else!
     p.max_skirt_size = (2*PI*radius)/(4*patch_size_in_quads)*0.00001*8*8848.0;
 
     DrawItem &d = p.patch;
@@ -556,10 +523,6 @@ struct CameraInfo
     float aspect_ratio;
     float near_plane;
     float far_plane;
-
-    // adhock stuff
-    Vec3d real_pos;
-    bool draw_nodes;
 };
 
 void InitCameraInfo(CameraInfo &info, float fovy_rad, float aspect_ratio,
@@ -686,52 +649,14 @@ void RenderPlanet(Planet &planet, CameraInfo cam)
     planet.uniforms.proj.value.m4 = projection;
     planet.uniforms.view.value.m4 = view;
 
-#if 0
-    Vec3 colors[] =
-    {
-        /*  0 */ V3(1.0f),
-        /*  1 */ V3(0.0f, 1.0f, 1.0f),
-        /*  2 */ V3(1.0f, 0.0f, 1.0f),
-        /*  3 */ V3(1.0f, 1.0f, 0.0f),
-        /*  4 */ V3(0.0f, 0.0f, 1.0f),
-        /*  5 */ V3(0.0f, 1.0f, 0.0f),
-        /*  6 */ V3(1.0f, 0.0f, 0.0f),
-
-        /*  7 */ V3(0.5f),
-        /*  8 */ V3(0.0f, 0.5f, 0.5f),
-        /*  9 */ V3(0.5f, 0.0f, 0.5f),
-        /* 10 */ V3(0.5f, 0.5f, 0.0f),
-        /* 11 */ V3(0.0f, 0.0f, 0.5f),
-        /* 12 */ V3(0.0f, 0.5f, 0.0f),
-        /* 13 */ V3(0.5f, 0.0f, 0.0f),
-
-        /* 14 */ V3(0.25f),
-        /* 15 */ V3(0.5f, 0.0f, 1.0f),
-        /* 16 */ V3(0.0f, 1.0f, 0.5f),
-        /* 17 */ V3(1.0f, 0.5f, 0.0f),
-        /* 18 */ V3(0.0f, 0.5f, 1.0f),
-        /* 19 */ V3(0.5f, 1.0f, 0.0f),
-        /* 20 */ V3(1.0f, 0.0f, 0.5f),
-    };
-#endif
-
-    // Allows us to "freeze" LOD
-    Vec3d vantage_pos = cam.position;
-    cam.position = cam.real_pos;
-
-    // TODO: Fix
-    static uint32_t tick = 0;
-    tick++;
-
+    // NOTE: a hack
     int generations_per_frame = 100;
 
-    //if (!cam.draw_nodes)
-    //{
     for (int i = 0; i < planet.quads.num; ++i)
     {
         Quad &q = planet.quads.data[i];
 
-        TextureRect texrect = GetHeightMapForQuad(planet, q, tick,
+        TextureRect texrect = GetHeightMapForQuad(planet, q,
                                                   generations_per_frame);
         planet.hmap.texture = texrect.texture;
         planet.uniforms.hmap.corners.value.v2[0] = texrect.corners[0];
@@ -753,45 +678,8 @@ void RenderPlanet(Planet &planet, CameraInfo cam)
 
         Draw(planet.patch);
     }
-    //}
-#if 0
-    else
-    {
-        glUseProgram(0);
 
-        glMatrixMode(GL_PROJECTION);
-        glLoadMatrixf(projection.data[0]);
-        glMatrixMode(GL_MODELVIEW);
-        glLoadMatrixf(view.data[0]);
-
-        glBegin(GL_QUADS);
-        glColor3f(1.0f, 1.0f, 1.0f);
-        for (int i = 0; i < planet.quads.num; ++i)
-        {
-            Quad &q = planet.quads.data[i];
-            int indices[4] = {2, 3, 1, 0}; //{0, 1, 3, 2};
-            for (int j = 0; j < 4; ++j)
-            {
-                int index = indices[j];
-                Vec3d p = q.p[index] - cam.position;
-                glVertex3f(p.x, p.y, p.z);
-            }
-        }
-        glEnd();
-    }
-    glUseProgram(0);
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadMatrixf(projection.data[0]);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadMatrixf(view.data[0]);
-
-    glBegin(GL_POINTS);
-    glColor3f(1.0f, 0.0f, 0.0f);
-    Vec3d p = vantage_pos - cam.position;
-    glVertex3f(p.x, p.y, p.z);
-    glEnd();
-#endif
+    planet.render_tick++;
 }
 
 
@@ -927,13 +815,7 @@ int main(int argc, char **argv)
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 
-    //glLineWidth(1.5f);
-    //glPointSize(7.5f);
-
     bool wire_frame = false;
-    bool freeze_lod = false;
-    bool draw_nodes = false;
-    Vec3d freeze_pos = {};
     float temp_skirt_size = 0.0f;
 
     double radius = 6371000.0;
@@ -1006,26 +888,6 @@ int main(int argc, char **argv)
     }
 
     Camera cam = save.active_camera;
-
-    cam.position = V3d(0.0);
-    //cam.position.z = -(radius * 2.3);
-    cam.position.z = -radius - 1000.0;
-    cam.angles = V3(0.0f);
-    //cam.angles.x = DegToRad(90.0f);
-
-    //freeze_lod = true;
-
-    Vec3d frz_p[] =
-    {
-        V3d(radius * 0.25, -(radius * 0.25), -(radius * 2.0)),
-        V3d(radius * 0.25, -(radius * 0.25), -(radius * 1.5)),
-        V3d(radius * 0.25, -(radius * 0.25), -(radius * 1.3)),
-        V3d(radius * 0.25, -(radius * 0.25), -(radius * 1.2)),
-        V3d(radius * 0.25, -(radius * 0.25), -(radius * 1.0)),
-    };
-    int frz_i = 0;
-    int frz_mod = sizeof(frz_p) / sizeof(*frz_p);
-    freeze_pos = frz_p[frz_i];
 
     double move_speed = 1000.0; // m/s
     float look_speed = 2.0f; // rad/s
@@ -1122,29 +984,6 @@ int main(int argc, char **argv)
                             break;
                         }
 
-                        // Toggle LOD freezing
-                        case SDL_SCANCODE_L:
-                        {
-                            freeze_lod = !freeze_lod;
-                            if (freeze_lod)
-                                freeze_pos = cam.position;
-                            break;
-                        }
-
-                        // Use next freeze pos
-                        case SDL_SCANCODE_J:
-                        {
-                            frz_i = (frz_i + 1) % frz_mod;
-                            freeze_pos = frz_p[frz_i];
-                            break;
-                        }
-
-                        case SDL_SCANCODE_N:
-                        {
-                            draw_nodes = !draw_nodes;
-                            break;
-                        }
-
                         // Toggle skirts
                         case SDL_SCANCODE_K:
                         {
@@ -1172,7 +1011,7 @@ int main(int argc, char **argv)
 
         END_TIMED_BLOCK(EventHandling);
 
-
+        // Update
         BEGIN_TIMED_BLOCK(UpdateSimulation);
 
         const Uint8 *keys = SDL_GetKeyboardState(nullptr);
@@ -1227,7 +1066,7 @@ int main(int argc, char **argv)
 
         END_TIMED_BLOCK(UpdateSimulation);
 
-
+        // Render
         BEGIN_TIMED_BLOCK(Rendering);
 
         float fovy = DegToRad(50.0f);
@@ -1243,25 +1082,19 @@ int main(int argc, char **argv)
         cam_info.near_plane = near;
         cam_info.far_plane = far;
 
-        cam_info.real_pos = cam.position;
-        if (freeze_lod) cam_info.position = freeze_pos;
-        cam_info.draw_nodes = draw_nodes;
-
-        // Render
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
         RenderPlanet(planet, cam_info);
 
         END_TIMED_BLOCK(Rendering);
 
-
+        // Draw screen
         BEGIN_TIMED_BLOCK(DrawScreen);
 
         SDL_GL_SwapWindow(window);
         SDL_Delay(10);
 
         END_TIMED_BLOCK(DrawScreen);
-
 
         // Check GL errors
         for (GLenum err; (err = glGetError()) != GL_NO_ERROR; )

@@ -7,7 +7,7 @@ float PerlinNoise3(double x, double y, double z);
 
 #ifdef PERLIN_IMPLEMENTATION
 
-static unsigned char perlin_random_table[256*2] =
+static unsigned char perlin_random_table[256] =
 {
     211,222, 90, 42,136, 37,204,126, 22,101,213,137,251, 28,247,205,
     185,176,200,206,243,130,252,188, 19,235,231,  1,170,109, 11, 31,
