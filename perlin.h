@@ -27,20 +27,12 @@ static unsigned char perlin_random_table[256] =
      20,143,119,103,113,191,  9, 41, 74,216,  2,111, 21, 92,248, 55,
 };
 
-static float perlin_vectors[12][3] =
+static float perlin_vectors[16][3] =
 {
-    { -1.0f, -1.0f,  0.0f },
-    { -1.0f,  1.0f,  0.0f },
-    {  1.0f, -1.0f,  0.0f },
-    {  1.0f,  1.0f,  0.0f },
-    { -1.0f,  0.0f, -1.0f },
-    { -1.0f,  0.0f,  1.0f },
-    {  1.0f,  0.0f, -1.0f },
-    {  1.0f,  0.0f,  1.0f },
-    {  0.0f, -1.0f, -1.0f },
-    {  0.0f, -1.0f,  1.0f },
-    {  0.0f,  1.0f, -1.0f },
-    {  0.0f,  1.0f,  1.0f },
+    {1,1,0},{-1,1,0},{1,-1,0},{-1,-1,0},
+    {1,0,1},{-1,0,1},{1,0,-1},{-1,0,-1},
+    {0,1,1},{0,-1,1},{0,1,-1},{0,-1,-1},
+    {1,1,0},{-1,1,0},{0,-1,1},{0,-1,-1},
 };
 
 inline int PerlinRandom(int seed)
@@ -51,7 +43,7 @@ inline int PerlinRandom(int seed)
 float PerlinGradient(float x, float y, float z, int ix, int iy, int iz)
 {
     int rand = PerlinRandom(PerlinRandom(PerlinRandom(ix) + iy) + iz);
-    float *vec = perlin_vectors[rand % 12];
+    float *vec = perlin_vectors[rand & 15];
     return x*vec[0] + y*vec[1] + z*vec[2];
 }
 
